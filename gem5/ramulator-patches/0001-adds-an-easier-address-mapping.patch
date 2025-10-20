@@ -1,0 +1,112 @@
+From 4306a94c7773b94c16894b39f1edaa73a8eb4480 Mon Sep 17 00:00:00 2001
+From: Nisa Bostanci <nisabstnc@gmail.com>
+Date: Tue, 22 Oct 2024 14:05:16 +0200
+Subject: [PATCH] adds an easier address mapping
+
+---
+ src/addr_mapper/impl/rit.cpp                  | 41 +++++++++++++++++++
+ src/addr_mapper/impl/rit.h                    |  1 +
+ .../impl/rowpolicy/basic_rowpolicies.cpp      |  4 +-
+ 3 files changed, 43 insertions(+), 3 deletions(-)
+
+diff --git a/src/addr_mapper/impl/rit.cpp b/src/addr_mapper/impl/rit.cpp
+index 67d7c9d..9e9baac 100644
+--- a/src/addr_mapper/impl/rit.cpp
++++ b/src/addr_mapper/impl/rit.cpp
+@@ -147,6 +147,19 @@ void LinearMapperBase_with_rit::dump_rit(int flat_bank_id) {
+   std::cout << "======================" << std::endl;
+ }
+ 
++// print address bits with corresponding level names 
++void LinearMapperBase_with_rit::print_addr_bits(Request& req){
++  //get the address vector of req
++  std::vector<int> addr_vec = req.addr_vec;
++  //print the address bits with corresponding level names
++  std::cout << "[ADDRESS VECTOR] address: " << req.addr << " ";
++  //create a name list 
++  std::vector<std::string> name_list = {"channel", "rank", "bankgroup", "bank", "row"};
++  for (int i = 0; i < m_num_levels-1; i++) {
++    std::cout << name_list[i] << ": " << addr_vec[i] << " ";
++  }
++  std::cout << std::endl;
++}
+ class ChRaBaRoCo_with_rit final : public LinearMapperBase_with_rit, public Implementation {
+   RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, ChRaBaRoCo_with_rit, "ChRaBaRoCo_with_rit", "Applies a trival mapping to the address.");
+ 
+@@ -222,6 +235,34 @@ class MOP4CLXOR_with_rit final : public LinearMapperBase_with_rit, public Implem
+       }
+       // perform indirection
+       LinearMapperBase_with_rit::apply_indirection(req);
++
++      LinearMapperBase_with_rit::print_addr_bits(req);
++    }
++};
++
++class MOP4CL_with_rit final : public LinearMapperBase_with_rit, public Implementation {
++  RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, MOP4CL_with_rit, "MOP4CL_with_rit", "Applies a MOP4CL mapping to the address.");
++
++  public:
++    void init() override { };
++
++    void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
++      LinearMapperBase_with_rit::setup(frontend, memory_system);
++    }
++
++    void apply(Request& req) override {
++      req.addr_vec.resize(m_num_levels, -1);
++      Addr_t addr = req.addr >> m_tx_offset;
++      req.addr_vec[m_col_bits_idx] = slice_lower_bits(addr, 2);
++      for (int lvl = 0 ; lvl < m_row_bits_idx ; lvl++)
++          req.addr_vec[lvl] = slice_lower_bits(addr, m_addr_bits[lvl]);
++      req.addr_vec[m_col_bits_idx] += slice_lower_bits(addr, m_addr_bits[m_col_bits_idx]-2) << 2;
++      req.addr_vec[m_row_bits_idx] = (int) addr;
++
++      // perform indirection
++      LinearMapperBase_with_rit::apply_indirection(req);
++
++      LinearMapperBase_with_rit::print_addr_bits(req);
+     }
+ };
+ 
+diff --git a/src/addr_mapper/impl/rit.h b/src/addr_mapper/impl/rit.h
+index ac14fd2..c2f56c8 100644
+--- a/src/addr_mapper/impl/rit.h
++++ b/src/addr_mapper/impl/rit.h
+@@ -43,6 +43,7 @@ class LinearMapperBase_with_rit : public IAddrMapper {
+     void rit_remove_entry(int flat_bank_id, int src_row, int dst_row);
+     std::pair<int, int> get_unswap_pair(int flat_bank_id, const std::unordered_map<int, int>& exclusion_list);
+     void dump_rit(int flat_bank_id);
++    void print_addr_bits(Request& req);
+ };
+ 
+ }   // namespace Ramulator
+\ No newline at end of file
+diff --git a/src/dram_controller/impl/rowpolicy/basic_rowpolicies.cpp b/src/dram_controller/impl/rowpolicy/basic_rowpolicies.cpp
+index 36a94d9..801ee7f 100644
+--- a/src/dram_controller/impl/rowpolicy/basic_rowpolicies.cpp
++++ b/src/dram_controller/impl/rowpolicy/basic_rowpolicies.cpp
+@@ -51,7 +51,7 @@ class ClosedRowPolicy : public IRowPolicy, public Implementation {
+       m_ctrl = cast_parent<IDRAMController>();
+       m_dram = m_ctrl->m_dram;
+ 
+-      m_cap = param<int>("cap").default_val(10000000); // TODO
++      m_cap = param<int>("cap").default_val(1); // TODO
+ 
+       m_rank_level = m_dram->m_levels("rank");
+       m_bankgroup_level = m_dram->m_levels("bankgroup");
+@@ -108,12 +108,10 @@ class ClosedRowPolicy : public IRowPolicy, public Implementation {
+         
+         m_col_accesses[flat_bank_id]++;
+ 
+-        if (m_col_accesses[flat_bank_id] >= m_cap) {
+           Request req(req_it->addr_vec, m_PRE_req_id);
+           m_ctrl->priority_send(req);
+           m_col_accesses[flat_bank_id] = 0;
+           s_num_close_reqs++;
+-        }
+       }
+     };
+ };
+-- 
+2.34.1
+

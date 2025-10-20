@@ -1,0 +1,35 @@
+Frontend:
+  impl: GEM5
+  clock_ratio: 8
+
+MemorySystem:
+  impl: GenericDRAM
+  clock_ratio: 3
+
+  DRAM:
+    impl: DDR5-VRR
+    org:
+      preset: DDR5_16Gb_x8
+      channel: 1
+      rank: 2
+    timing:
+      preset: DDR5_3200AN 
+    RFM:
+      BRC: 2
+    PRAC: false
+
+  Controller:
+    impl: Generic
+    Scheduler:
+      impl: FRFCFS
+    RefreshManager:
+      impl: DelayedRefresh
+      max_delays: 2
+    RowPolicy:
+      impl: ClosedRowPolicy
+      cap: 16
+
+  AddrMapper:
+    impl: RoBaRaCoCh_with_rit
+
+
