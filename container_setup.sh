@@ -11,8 +11,8 @@ fi
 
 echo "[INFO] Setting up the environment for LeakyHammer"
 
-echo "[INFO] Installing required packages for python3"
-python3 -m pip install -r requirements.txt
+echo "[INFO] Installing required packages for python3 via uv"
+uv sync
 
 # get container command from arguments
 container_command=$1

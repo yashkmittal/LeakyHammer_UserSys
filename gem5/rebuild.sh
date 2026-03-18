@@ -23,7 +23,7 @@ rebuild_ramulator() {
 
 rebuild_gem5() {
     echo "Rebuilding gem5"
-    python3 `which scons` build/X86/gem5.opt -j7
+    python3 `which scons` build/X86/gem5.opt -j2
     echo "gem5 rebuilt successfully"
     scons -C util/m5 build/x86/out/m5
     echo "m5 util built successfully"

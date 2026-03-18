@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.tar
+.git/
+.python-version
+*.egg-info/

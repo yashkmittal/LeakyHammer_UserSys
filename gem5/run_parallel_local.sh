@@ -13,13 +13,13 @@ if [ "$(basename "$PWD")" != "gem5" ]; then
 fi
 
 
-if ! python3 result-scripts/setup_test.py; then
+if ! uv run python3 result-scripts/setup_test.py; then
     echo "Error: Setup failed"
     exit 1
 fi
 
 echo "Running gem5 experiments in parallel"
-if ! python3 result-scripts/execute_run_script.py; then
+if ! uv run python3 result-scripts/execute_run_script.py; then
     echo "Error: Execution failed"
     exit 1
 fi

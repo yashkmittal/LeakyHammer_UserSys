@@ -47,7 +47,7 @@ ERROR_IDX = 0
 MSG_LEN_IDX = 1
 
 MSG_BYTES = 100
-DATA_PATTERNS = ["0x00", "0x55", "0xAA", "0xFF"]
+DATA_PATTERNS = ["0x00", "0xFF"]
 
 
 
@@ -69,7 +69,7 @@ def get_preset_variables(preset, is_noise=False):
       RECEIVER = f"{BASE_DIR}/attack-binaries/prac_receiver"
       TXN_PERIOD = 25000
       if is_noise:
-          ACCESS_RATES = range(175, 2000, 25)  
+          ACCESS_RATES = range(175, 2000, 100)  
       return RESULT_DIR, CFG_FILE, SENDER, RECEIVER, TXN_PERIOD, ACCESS_RATES
   elif preset == "RFM":
       RESULT_DIR = f"{BASE_DIR}/results/{preset.lower()}/{result_subdir}"
@@ -78,7 +78,7 @@ def get_preset_variables(preset, is_noise=False):
       RECEIVER = f"{BASE_DIR}/attack-binaries/rfm_receiver"
       TXN_PERIOD = 20000
       if is_noise:
-          ACCESS_RATES = range(175, 400, 10)
+          ACCESS_RATES = range(175, 400, 25)
       return RESULT_DIR, CFG_FILE, SENDER, RECEIVER, TXN_PERIOD, ACCESS_RATES
 
 CMD_ARGS = [

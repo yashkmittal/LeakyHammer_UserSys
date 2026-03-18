@@ -14,7 +14,7 @@ fi
 
 
 echo "Plotting figures 4 and 7"
-if ! python3 result-scripts/parse_and_print.py; then
+if ! uv run python3 result-scripts/parse_and_print.py; then
     echo "Error: Plotting failed"
     exit 1
 fi

@@ -21,13 +21,13 @@ fi
 
 
 echo "Setting up experiment directories and scripts"
-if ! python3 ./result-scripts/setup_test.py -c -cc $container_command; then
+if ! uv run python3 ./result-scripts/setup_test.py -c -cc $container_command; then
     echo "Error: Setup failed"
     exit 1
 fi
 
 echo "Running gem5 experiments in parallel"
-if ! python3 ./result-scripts/execute_run_script.py; then
+if ! uv run python3 ./result-scripts/execute_run_script.py; then
     echo "Error: Execution failed"
     exit 1
 fi

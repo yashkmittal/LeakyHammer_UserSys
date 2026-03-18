@@ -1,5 +1,7 @@
 FROM ubuntu:20.04
 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
 ENV DEBIAN_FRONTEND=noninteractive  
 
 RUN apt-get update && apt-get install -y \
@@ -12,8 +14,6 @@ RUN apt-get update && apt-get install -y \
     cmake=3.16.3-1ubuntu1 \
     cmake-data=3.16.3-1ubuntu1 \
     python3=3.8.2-0ubuntu2 \
-    python3-pip=20.0.2-5ubuntu1.11 \
-    scons=3.1.2-2 \
     python3-dev \
     libpython3-dev:amd64=3.8.2-0ubuntu2 \
     libpython3-stdlib:amd64=3.8.2-0ubuntu2 \
@@ -27,22 +27,23 @@ RUN apt-get update && apt-get install -y \
     libboost-locale1.71.0:amd64=1.71.0-6ubuntu6 \
     libboost-thread1.71.0:amd64=1.71.0-6ubuntu6 \
     libboost1.71-dev:amd64=1.71.0-6ubuntu6 \
+    zlib1g \
+    zlib1g-dev \
     libc-bin=2.31-0ubuntu9.18 \
     m4=1.4.18-4
 
-
 WORKDIR /app
 
-RUN pip3 install matplotlib==3.1.2 pandas==1.3.4 seaborn==0.11.2 pyyaml wget==3.2 scipy==1.3.3 numpy==1.17.4 scons==3.1.2
-
+COPY pyproject.toml uv.lock /app/
+ENV UV_PYTHON=/usr/bin/python3
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+RUN uv sync --frozen --no-dev --no-install-project
+ENV PATH="/opt/venv/bin:$PATH"
 
 # RUN ln -sf $(which g++-10) /usr/local/bin/g++
 # RUN ln -sf $(which gcc-10) /usr/local/bin/gcc
 
 ENV CXX=g++-10
 ENV CC=gcc-10
-
-RUN ln -s /usr/bin/python3 /usr/bin/python
-
 
 ENTRYPOINT [ "/bin/bash", "-l", "-c" ]
