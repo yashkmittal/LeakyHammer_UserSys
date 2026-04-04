@@ -69,7 +69,8 @@ def get_preset_variables(preset, is_noise=False):
       RECEIVER = f"{BASE_DIR}/attack-binaries/prac_receiver"
       TXN_PERIOD = 25000
       if is_noise:
-          ACCESS_RATES = range(175, 2000, 100)  
+          # Diverse subset: endpoints (275, 1975) and target point 475 (~88% intensity)
+          ACCESS_RATES = [275, 475, 1075, 1975]
       return RESULT_DIR, CFG_FILE, SENDER, RECEIVER, TXN_PERIOD, ACCESS_RATES
   elif preset == "RFM":
       RESULT_DIR = f"{BASE_DIR}/results/{preset.lower()}/{result_subdir}"
@@ -78,7 +79,8 @@ def get_preset_variables(preset, is_noise=False):
       RECEIVER = f"{BASE_DIR}/attack-binaries/rfm_receiver"
       TXN_PERIOD = 20000
       if is_noise:
-          ACCESS_RATES = range(175, 400, 25)
+          # Diverse subset: endpoints (200, 325) and target point 263 (~50% intensity)
+          ACCESS_RATES = [200, 263, 325]
       return RESULT_DIR, CFG_FILE, SENDER, RECEIVER, TXN_PERIOD, ACCESS_RATES
 
 CMD_ARGS = [
