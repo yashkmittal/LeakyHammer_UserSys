@@ -82,6 +82,16 @@ def get_preset_variables(preset, is_noise=False):
           # Diverse subset: endpoints (200, 325) and target point 263 (~50% intensity)
           ACCESS_RATES = [200, 263, 325]
       return RESULT_DIR, CFG_FILE, SENDER, RECEIVER, TXN_PERIOD, ACCESS_RATES
+  elif preset == "DREAM":
+      RESULT_DIR = f"{BASE_DIR}/results/{preset.lower()}/{result_subdir}"
+      CFG_FILE = f"{BASE_DIR}/configs/rhsc/ramulator/dream.yaml"
+      SENDER = f"{BASE_DIR}/attack-binaries/rfm_sender"
+      RECEIVER = f"{BASE_DIR}/attack-binaries/rfm_receiver"
+      TXN_PERIOD = 20000
+      if is_noise:
+          # Use same access rates as RFM for comparison
+          ACCESS_RATES = [200, 263, 325]
+      return RESULT_DIR, CFG_FILE, SENDER, RECEIVER, TXN_PERIOD, ACCESS_RATES
 
 CMD_ARGS = [
     f"{BASE_DIR}/build/X86/gem5.opt",

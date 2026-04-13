@@ -34,7 +34,7 @@
 #include "rowhammer-side.hh"
 
 #define ROW_COUNT       2
-#define ASSERT_THRESH   3
+#define ASSERT_THRESH   1
 
 const int NUM_CHANNEL = 1;
 const int NUM_RANKS = 2;

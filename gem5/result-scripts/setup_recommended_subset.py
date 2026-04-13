@@ -19,7 +19,7 @@ def create_run_scripts(command, sim_result_file_path, slurm_job_name):
 
 def get_recommended_commands():
     run_scripts = []
-    test_presets = ["PRAC", "RFM"]
+    test_presets = ["PRAC", "RFM", "DREAM"]
     
     for preset in test_presets:
         # Baseline (Rate 0)

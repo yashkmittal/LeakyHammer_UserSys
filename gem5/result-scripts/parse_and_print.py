@@ -8,12 +8,12 @@ from run_config import *
 
 def parse_simulations(preset, is_noise=False):
     RESULT_DIR, CFG_FILE, SENDER, RECEIVER, TXN_PERIOD, ACCESS_RATES = get_preset_variables(preset, is_noise)
-    expected_size = len(ACCESS_RATES) * len(DATA_PATTERNS) 
-    df = pd.DataFrame(index=range(expected_size), columns=["rate", "pattern", "sent", "received", "time", "errors"])
-    df_index = 0
+    results_list = []
     for rate in ACCESS_RATES:
         for pattern in DATA_PATTERNS:
             result_file = make_res_file(RESULT_DIR, preset, TXN_PERIOD, MSG_BYTES, pattern, rate)
+            if not os.path.exists(result_file):
+                continue
             result = parse_file(result_file)
             if EARLY_TERMINATE and result.errors >= 0:
                 print(f"[INFO] can early terminate ")
@@ -22,8 +22,16 @@ def parse_simulations(preset, is_noise=False):
                 if jobid != -1:
                     print(f"[INFO] Killing job {slurm_job_name} with ID {jobid}")
                     subprocess.run(["scancel", str(jobid)])
-            df.iloc[df_index] = [rate, pattern, result.send_binary, result.recv_binary, result.txn_time, result.errors]
-            df_index += 1
+            results_list.append({
+                "rate": rate,
+                "pattern": pattern,
+                "sent": result.send_binary,
+                "received": result.recv_binary,
+                "time": result.txn_time,
+                "errors": result.errors
+            })
+    
+    df = pd.DataFrame(results_list)
     #print(f"Parsed {len(df)} runs")
     noise_prefix = "noise_" if is_noise else ""
     df.to_csv(f"{BASE_DIR}/results/{noise_prefix}ber_{preset.lower()}.csv", index=False)
@@ -52,12 +60,20 @@ def print_results_noise(preset):
 def main():
     parse_simulations("PRAC")
     parse_simulations("RFM")
-    print("Results for baseline PRAC and RFM:")
+    parse_simulations("DREAM")
+    print("Results for baseline PRAC, RFM, and DREAM:")
     print_results("PRAC")
     print_results("RFM")
+    print_results("DREAM")
+    
     parse_simulations("PRAC", is_noise=True)
     parse_simulations("RFM", is_noise=True)
+    parse_simulations("DREAM", is_noise=True)
 
+    print("\nPRAC Noise Results:")
+    # For PRAC, we use the 475 rate which is ~88% intensity in the plotter script logic
+    # But let's just run the plotter to get the printouts
+    
     # run python3 plot-scripts/figure7_plotter.py results/noise_ber_rfm.csv figures/figure7.pdf 100
     subprocess.run([
         "python3",
@@ -67,6 +83,17 @@ def main():
         str(MSG_BYTES)
     ])
 
+    print("\nDREAM Noise Results:")
+    # DREAM uses same plotter as RFM as it is functionally similar
+    subprocess.run([
+        "python3",
+        f"{BASE_DIR}/plot-scripts/figure7_plotter.py",
+        f"{BASE_DIR}/results/noise_ber_dream.csv",
+        f"{BASE_DIR}/figures/figure7_dream.pdf",
+        str(MSG_BYTES)
+    ])
+
+    print("\nPRAC Noise Results:")
     # run python3 plot-scripts/figure4_plotter.py results/noise_ber_prac.csv figures/figure4.pdf 100
     subprocess.run([
         "python3",

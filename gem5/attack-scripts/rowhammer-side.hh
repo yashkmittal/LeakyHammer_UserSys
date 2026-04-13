@@ -12,9 +12,9 @@
 
 #define FLUSH()                 fflush(stdout)
 #define SYS_MMAP_ATK            451
-#define PERIODIC_CAP_NS         1300 // 1000
-#define PERIODIC_CAP_NS_RFM     550
-#define ACCESS_CAP_NS           250
+#define PERIODIC_CAP_NS         8000
+#define PERIODIC_CAP_NS_RFM     6000
+#define ACCESS_CAP_NS           2000
 #define SYNC_ITERS              4
 #define TREFI                   3900
 
