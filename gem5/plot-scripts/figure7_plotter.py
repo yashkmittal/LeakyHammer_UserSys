@@ -7,14 +7,17 @@ import sys
 file_name = ""
 figure_name = "" 
 MSG_BYTES = 1  # Default value, can be overridden by command line argument
+label = "RFM"  # Default label for the printout; pass a 4th arg to override
 
 # get file name as argument
 if len(sys.argv) > 3:
     file_name = sys.argv[1]
     figure_name = sys.argv[2]
     MSG_BYTES = int(sys.argv[3])
+    if len(sys.argv) > 4:
+        label = sys.argv[4]
 else:
-    print("Usage: python figure2_plotter.py <input_file_name> <figure_name> <number_of_bytes>")
+    print("Usage: python figure2_plotter.py <input_file_name> <figure_name> <number_of_bytes> [label]")
     sys.exit(1)
 
 NUM_BITS = MSG_BYTES * 8
@@ -111,8 +114,10 @@ plt.axvline(x=50, color='purple', linestyle='--', linewidth=2)
 ax1.set_xlim(0, 100)
 
 # remove legend
-ax1.get_legend().remove()
-ax2.get_legend().remove()
+leg1 = ax1.get_legend()
+if leg1: leg1.remove()
+leg2 = ax2.get_legend()
+if leg2: leg2.remove()
 
 # Tight layout for better spacing
 plt.tight_layout()
@@ -120,7 +125,7 @@ plt.tight_layout()
 plt.savefig(figure_name, dpi=300, bbox_inches='tight')
 
 
-print("RFM Noise Results:")
+print(f"{label} Noise Results:")
 interest_pt = 50
 err_entry = df[(df['intensity'] >= interest_pt -1) & (df['intensity'] <= interest_pt +1)]["errorprob"]
 #print("Error Probability: " + str(err_entry.values[0]))

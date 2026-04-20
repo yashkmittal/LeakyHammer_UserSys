@@ -552,6 +552,100 @@ bool prac_trefi_send(std::vector<char*>& row_ptrs, uint32_t timeout, uint32_t ma
     return false;
 }
 
+// DREAM-C: hammer target rows until DRFMab fires (latency spike), then return.
+// The DREAM-C plugin fires DRFMab after `threshold` activations to any rows sharing
+// the same DCT group (group_id = row_id / gang_size). With threshold=40 and gang_size=32,
+// rows 0 and 1 both land in group 0, so 40 hammers to either row triggers DRFMab.
+//
+// We MUST alternate between at least two distinct rows in the same gang. Hammering
+// a single row is a row-buffer hit on every access (no ACT, no counter increment)
+// when the controller's RowPolicy keeps the row open. Alternating rows forces an
+// activate on every iteration, so the DREAM counter actually accumulates.
+void dream_send(std::vector<char*>& row_ptrs, uint32_t timeout) {
+    uint64_t start = m5_rpns();
+    size_t n_rows = row_ptrs.size();
+    size_t idx = 0;
+    while (m5_rpns() - start < timeout) {
+        char* target_row = row_ptrs[idx];
+        idx++;
+        if (idx >= n_rows) idx = 0;
+        asm volatile("clflush (%0)" : : "r" (target_row) : "memory");
+        uint64_t ns1 = m5_rpns();
+        *(volatile char*)target_row;
+        uint64_t ns2 = m5_rpns();
+        uint64_t latency = ns2 - ns1;
+        // DRFMab stalls all banks; latch is in the range above normal row miss but below PRAC ABO
+        if (latency > DREAM_DRFMAB_CAP_NS && latency < PERIODIC_CAP_NS) {
+            return;
+        }
+    }
+}
+
+// DREAM-C: count DRFMab stalls observed on the receiver's bank during the window.
+// Because DRFMab stalls ALL banks in the sub-channel, the receiver on any bank will
+// see the same latency spike when the sender triggers DRFMab. Returns true if at
+// least DREAM_ASSERT_THRESH spikes are observed (i.e., sender was hammering).
+bool dream_receive(std::vector<char*>& row_ptrs, uint32_t timeout) {
+    uint64_t start = m5_rpns();
+    char* target_row = row_ptrs[0];
+    int drfm_ctr = 0;
+    while (m5_rpns() - start < timeout) {
+        asm volatile("clflush (%0)" : : "r" (target_row) : "memory");
+        uint64_t ns1 = m5_rpns();
+        *(volatile char*)target_row;
+        uint64_t ns2 = m5_rpns();
+        uint64_t latency = ns2 - ns1;
+        if (latency > DREAM_DRFMAB_CAP_NS && latency < PERIODIC_CAP_NS) {
+            drfm_ctr++;
+        }
+    }
+    return drfm_ctr > DREAM_ASSERT_THRESH;
+}
+
+// DREAM-C v2: spread-row, rate-throttled receiver. Round-robins probes across
+// N rows that each map to a distinct DCT gang (group_id = row_id / gang_size).
+//
+// Two design constraints:
+//   1. Per-gang ACT rate must stay below DREAM's threshold (40 / 64ms / gang)
+//      or the receiver triggers DRFMab on its own bank, indistinguishable from
+//      the sender. Round-robin across N gangs divides the receiver's per-gang
+//      ACT rate by N.
+//   2. Probe interval must be <= DRFMab stall duration (~7us) so every stall
+//      gets caught by at least one probe.
+//
+// We satisfy both by enforcing a probe_interval_ns spacing between probes.
+// With N=512 gangs and probe_interval=5us:
+//   - probes per attack: 16ms / 5us = 3200; per-gang ACTs: 6.25 (< 10 budget)
+//   - probes per 20us window: 4; each probe spans 5us so catches any 7us stall
+int dream_receive_count(std::vector<char*>& row_ptrs, uint32_t timeout,
+                        uint32_t probe_interval_ns) {
+    uint64_t start = m5_rpns();
+    int drfm_ctr = 0;
+    size_t n_rows = row_ptrs.size();
+    size_t idx = 0;
+    uint64_t next_probe = start;
+    while (m5_rpns() - start < timeout) {
+        // Throttle: wait until next scheduled probe time. Skip throttle if
+        // probe_interval_ns is 0 (full speed mode for back-compat).
+        if (probe_interval_ns > 0) {
+            while (m5_rpns() < next_probe) { /* spin */ }
+            next_probe += probe_interval_ns;
+        }
+        char* target_row = row_ptrs[idx];
+        idx++;
+        if (idx >= n_rows) idx = 0;
+        asm volatile("clflush (%0)" : : "r" (target_row) : "memory");
+        uint64_t ns1 = m5_rpns();
+        *(volatile char*)target_row;
+        uint64_t ns2 = m5_rpns();
+        uint64_t latency = ns2 - ns1;
+        if (latency > DREAM_DRFMAB_CAP_NS && latency < PERIODIC_CAP_NS) {
+            drfm_ctr++;
+        }
+    }
+    return drfm_ctr;
+}
+
 bool prac_trefi_receive(std::vector<char*>& row_ptrs, uint32_t timeout, uint32_t max_lat) {
     uint64_t start = m5_rpns();
     char* target_row = row_ptrs[0];

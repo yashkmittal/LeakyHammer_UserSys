@@ -24,7 +24,7 @@ SKIP_EXISTING = True
 # do not change
 EARLY_TERMINATE = False
 # Number of threads used for the personal computer runs
-PERSONAL_RUN_THREADS = 4
+PERSONAL_RUN_THREADS = 16
 # Slurm username
 SLURM_USERNAME = "$USER" 
 # Slurm partition name
@@ -85,11 +85,10 @@ def get_preset_variables(preset, is_noise=False):
   elif preset == "DREAM":
       RESULT_DIR = f"{BASE_DIR}/results/{preset.lower()}/{result_subdir}"
       CFG_FILE = f"{BASE_DIR}/configs/rhsc/ramulator/dream.yaml"
-      SENDER = f"{BASE_DIR}/attack-binaries/rfm_sender"
-      RECEIVER = f"{BASE_DIR}/attack-binaries/rfm_receiver"
+      SENDER = f"{BASE_DIR}/attack-binaries/dream_sender"
+      RECEIVER = f"{BASE_DIR}/attack-binaries/dream_receiver"
       TXN_PERIOD = 20000
       if is_noise:
-          # Use same access rates as RFM for comparison
           ACCESS_RATES = [200, 263, 325]
       return RESULT_DIR, CFG_FILE, SENDER, RECEIVER, TXN_PERIOD, ACCESS_RATES
 
@@ -169,13 +168,13 @@ def parse_file(sim_result_file_path):
         return result
     with open(sim_result_file_path, "r", encoding="utf-8", errors="replace") as file:
         content = file.read()
-        send_match = re.search(r"\[SEND\] Binary: (\d+)", content)
+        send_match = re.search(r"\[(?:DREAM-)?SEND\] Binary: (\d+)", content)
         if send_match:
             result.send_binary = str(send_match.group(1))
-        recv_match = re.search(r"\[RECV\] Binary: (\d+)", content)
+        recv_match = re.search(r"\[(?:DREAM-)?RECV\] Binary: (\d+)", content)
         if recv_match:
             result.recv_binary = str(recv_match.group(1))
-        txn_match = re.search(r"\[RECV\] Received in (\d+) ns", content)
+        txn_match = re.search(r"\[(?:DREAM-)?RECV\] Received in (\d+) ns", content)
         if txn_match:
             result.txn_time = int(txn_match.group(1))
         if len(result.send_binary) != len(result.recv_binary):

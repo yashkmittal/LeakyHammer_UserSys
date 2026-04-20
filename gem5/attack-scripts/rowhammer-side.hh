@@ -40,6 +40,14 @@
 #define TERNARY_CAP_UP        240
 #define TERNARY_CAP_DOWN      130
 
+// DREAM-C DRFMab detection
+// DRFMab (nDRFMab=5000 mem cycles) is expected to be CPU-visible at ~2000-7000ns
+// based on the same ~7-20x amplification factor observed for RFM
+#define DREAM_DRFMAB_CAP_NS   2000    // Lower bound: well above normal row miss (~500ns)
+#define DREAM_DRFMAB_UPPER_NS 7500    // Upper bound: below PRAC ABO (8000ns)
+#define DREAM_ASSERT_THRESH   0       // Sender produces ~1 DRFMab per "1" window; require >0 spikes (i.e. >=1) to decode "1"
+#define DREAM_TXN_PERIOD      50000   // Window size (ns); 40 hammers ~20us => 2+ DRFMab per window
+
 long mmap_atk(size_t mem_size, long paddr);
 uint32_t fine_grained_sleep(uint32_t sleep_ns);
 void sleep_until(uint64_t target);
@@ -77,5 +85,13 @@ int rfm_receive_rfmctr(std::vector<char*>& row_ptrs, int assert_thresh);
 
 bool prac_trefi_send(std::vector<char*>& row_ptrs, uint32_t timeout, uint32_t max_lat);
 bool prac_trefi_receive(std::vector<char*>& row_ptrs, uint32_t timeout, uint32_t max_lat);
+
+// DREAM-C: detect DRFMab events (all-bank stall triggered by row-group activation counter)
+void dream_send(std::vector<char*>& row_ptrs, uint32_t timeout);
+bool dream_receive(std::vector<char*>& row_ptrs, uint32_t timeout);
+// v2: round-robin probes across N rows in N distinct gangs with rate-throttled
+// probing (probe_interval_ns spacing). Returns raw spike count for rate-based decoding.
+int  dream_receive_count(std::vector<char*>& row_ptrs, uint32_t timeout,
+                         uint32_t probe_interval_ns);
 
 #endif  // ROWHAMMER_SIDECH_H_

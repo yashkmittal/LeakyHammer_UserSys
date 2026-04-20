@@ -31,7 +31,7 @@ MemorySystem:
           impl: DREAM
           threshold: 40
           gang_size: 32
-          debug: true
+          debug: false
 
 
   AddrMapper:

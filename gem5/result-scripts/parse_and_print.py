@@ -70,30 +70,31 @@ def main():
     parse_simulations("RFM", is_noise=True)
     parse_simulations("DREAM", is_noise=True)
 
-    print("\nPRAC Noise Results:")
-    # For PRAC, we use the 475 rate which is ~88% intensity in the plotter script logic
-    # But let's just run the plotter to get the printouts
-    
-    # run python3 plot-scripts/figure7_plotter.py results/noise_ber_rfm.csv figures/figure7.pdf 100
+    print("\nNoise channel summary:")
+    print_results_noise("PRAC")
+    print_results_noise("RFM")
+    print_results_noise("DREAM")
+
+    # run python3 plot-scripts/figure7_plotter.py results/noise_ber_rfm.csv figures/figure7.pdf 100 RFM
     subprocess.run([
         "python3",
         f"{BASE_DIR}/plot-scripts/figure7_plotter.py",
         f"{BASE_DIR}/results/noise_ber_rfm.csv",
         f"{BASE_DIR}/figures/figure7.pdf",
-        str(MSG_BYTES)
+        str(MSG_BYTES),
+        "RFM"
     ])
 
-    print("\nDREAM Noise Results:")
-    # DREAM uses same plotter as RFM as it is functionally similar
+    # DREAM uses same plotter shape as RFM but is labeled distinctly
     subprocess.run([
         "python3",
         f"{BASE_DIR}/plot-scripts/figure7_plotter.py",
         f"{BASE_DIR}/results/noise_ber_dream.csv",
         f"{BASE_DIR}/figures/figure7_dream.pdf",
-        str(MSG_BYTES)
+        str(MSG_BYTES),
+        "DREAM"
     ])
 
-    print("\nPRAC Noise Results:")
     # run python3 plot-scripts/figure4_plotter.py results/noise_ber_prac.csv figures/figure4.pdf 100
     subprocess.run([
         "python3",

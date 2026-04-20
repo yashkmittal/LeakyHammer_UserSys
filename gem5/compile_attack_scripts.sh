@@ -11,3 +11,4 @@ sh $COMPILE_SCRIPTS_DIR/recompile-mr-latency.sh
 sh $COMPILE_SCRIPTS_DIR/recompile_noise.sh
 sh $COMPILE_SCRIPTS_DIR/recompile_prac.sh
 sh $COMPILE_SCRIPTS_DIR/recompile_rfm.sh
+sh $COMPILE_SCRIPTS_DIR/recompile_dream.sh

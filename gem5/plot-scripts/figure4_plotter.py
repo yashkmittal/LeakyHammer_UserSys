@@ -106,8 +106,10 @@ plt.axvline(x=87.5, color='purple', linestyle='--', linewidth=2)
 ax1.set_xlim(0, 100)
 
 # remove legend
-ax1.get_legend().remove()
-ax2.get_legend().remove()
+leg1 = ax1.get_legend()
+if leg1: leg1.remove()
+leg2 = ax2.get_legend()
+if leg2: leg2.remove()
 
 # Tight layout for better spacing
 plt.tight_layout()

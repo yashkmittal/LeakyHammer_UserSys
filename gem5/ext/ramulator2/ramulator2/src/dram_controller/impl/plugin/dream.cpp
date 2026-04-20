@@ -97,8 +97,10 @@ class DREAM : public IControllerPlugin, public Implementation {
           m_tusc[flat_bank_id][group_id]++;
 
           if (m_tusc[flat_bank_id][group_id] >= m_dream_th) {
-            std::cout << "[Ramulator::DREAM] Threshold reached for bank " << flat_bank_id << " group " << group_id << " at clk " << m_clk << std::endl;
-            
+            if (m_is_debug) {
+              std::cout << "[Ramulator::DREAM] Threshold reached for bank " << flat_bank_id << " group " << group_id << " at clk " << m_clk << std::endl;
+            }
+
             // Issue Directed Refresh (DRFMab)
             Request drfm_req(req_it->addr_vec, m_DRFMab_req_id);
             m_ctrl->priority_send(drfm_req);
