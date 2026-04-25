@@ -40,14 +40,17 @@ def entropy(p):
     return -1 * p * np.log2(p) - (1 - p) * np.log2(1 - p)
 
 def print_results(preset):
-    df = pd.read_csv(f"{BASE_DIR}/results/ber_{preset.lower()}.csv")
+    df = pd.read_csv(f"{BASE_DIR}/results/ber_{preset.lower()}.csv",
+                     dtype={'sent': str, 'received': str})
     avg_time = df['time'].mean()
     runtime_second = avg_time / 1000 / 1000 / 1000
     raw_bit_rate = (MSG_BYTES * 8) / runtime_second / 1024
-    print(f"{preset} Raw Bit Rate (Kbps):", raw_bit_rate)
+    avg_error_rate = df['errors'].mean() / (MSG_BYTES * 8)
+    print(f"{preset} Raw Bit Rate (Kbps): {raw_bit_rate:.3f}, mean BER: {avg_error_rate:.4f}")
 
 def print_results_noise(preset):
-    df = pd.read_csv(f"{BASE_DIR}/results/noise_ber_{preset.lower()}.csv")
+    df = pd.read_csv(f"{BASE_DIR}/results/noise_ber_{preset.lower()}.csv",
+                     dtype={'sent': str, 'received': str})
     avg_time = df['time'].mean()
     avg_error_rate = df['errors'].mean() / (MSG_BYTES * 8)
     runtime_second = avg_time / 1000 / 1000 / 1000

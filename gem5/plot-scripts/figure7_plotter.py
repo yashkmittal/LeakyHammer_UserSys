@@ -23,7 +23,8 @@ else:
 NUM_BITS = MSG_BYTES * 8
 
 
-data = pd.read_csv(file_name, index_col=False)
+data = pd.read_csv(file_name, index_col=False,
+                   dtype={'sent': str, 'received': str})
 plot_data = data[(data["rate"] >= 0) & (data["errors"] >= 0)].sort_values(by="rate")
 average_errors = plot_data.groupby("rate")["errors"].mean().reset_index()
 average_time = plot_data.groupby("rate")["time"].mean().reset_index()

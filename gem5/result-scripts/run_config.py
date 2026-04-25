@@ -24,7 +24,7 @@ SKIP_EXISTING = True
 # do not change
 EARLY_TERMINATE = False
 # Number of threads used for the personal computer runs
-PERSONAL_RUN_THREADS = 16
+PERSONAL_RUN_THREADS = 4
 # Slurm username
 SLURM_USERNAME = "$USER" 
 # Slurm partition name
@@ -47,7 +47,7 @@ ERROR_IDX = 0
 MSG_LEN_IDX = 1
 
 MSG_BYTES = 100
-DATA_PATTERNS = ["0x00", "0xFF"]
+DATA_PATTERNS = ["0x00", "0x55", "0xAA", "0xFF"]
 
 
 

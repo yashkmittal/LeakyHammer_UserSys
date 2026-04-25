@@ -51,7 +51,12 @@ int main(int argc, char *argv[]) {
     int msg_bytes = std::atoi(argv[2]);
     char data_pattern = std::strtol(argv[3], NULL, 16);
 
-    uint32_t txn_timeout = txn_period - 500;
+    // Leave 8us of margin: rfm_receive's loop check is at the top of each
+    // iteration, but a probe already inside the loop can take up to ~7us
+    // (an RFM stall) to complete after the timeout has elapsed. Without the
+    // margin, nearly every window overruns and the receiver desyncs from the
+    // sender's bit clock (manifesting as ~50% BER on alternating patterns).
+    uint32_t txn_timeout = txn_period - 8000;
 
     srand(0xdead);
     // N_CH, N_RA, CH, RA, BG, BA, RO, CO
@@ -72,16 +77,38 @@ int main(int argc, char *argv[]) {
 
     std::printf("[RECV] End of first window: %lu\n", next_window); FLUSH();
     int min_sleep_assert = std::numeric_limits<int>::max();
+    int n_resyncs = 0;
+    int total_skipped_bits = 0;
     uint64_t ns1 = m5_rpns();
     for(size_t i = 0; i < message.size(); i++) {
         message[i] = rfm_receive(row_ptrs, ASSERT_THRESH, txn_timeout);
         next_window += txn_period;
-        min_sleep_assert = std::min<int>(min_sleep_assert, next_window - m5_rpns());
+        int slack = (int)(next_window - m5_rpns());
+        min_sleep_assert = std::min<int>(min_sleep_assert, slack);
+
+        // Phase-resync: if the receive loop overran by one or more full
+        // periods, the receiver is sampling stale bits from the sender's past.
+        // Skip ahead by an integer number of periods to re-align with the
+        // sender's bit clock; skipped indices are filled with 0.
+        uint64_t now = m5_rpns();
+        if (now > next_window) {
+            uint64_t behind = now - next_window;
+            uint64_t skip = (behind + txn_period - 1) / txn_period;
+            for (uint64_t s = 0; s < skip && i + 1 < message.size(); s++) {
+                ++i;
+                message[i] = false;
+                ++total_skipped_bits;
+            }
+            next_window += skip * txn_period;
+            ++n_resyncs;
+        }
         sleep_until(next_window);
     }
     uint64_t ns2 = m5_rpns();
     uint64_t latency = ns2 - ns1;
     std::printf("[RECV] MinSleepAssert: %d\n", min_sleep_assert); FLUSH();
+    std::printf("[RECV] Resyncs: %d (%d bits skipped)\n",
+                n_resyncs, total_skipped_bits); FLUSH();
 
     std::printf("[RECV] Received in %ld ns\n", latency);
     std::printf("[RECV] Binary: ");
