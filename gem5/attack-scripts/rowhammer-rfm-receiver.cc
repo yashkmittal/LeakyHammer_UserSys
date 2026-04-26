@@ -34,7 +34,13 @@
 #include "rowhammer-side.hh"
 
 #define ROW_COUNT       2
-#define ASSERT_THRESH   1
+// Match the band-revert in rowhammer-side.hh: with PERIODIC_CAP_NS_RFM=550 and
+// ACCESS_CAP_NS=250 the receiver sees ~5-10 RFM events per "1" window, so the
+// original artifact's threshold of 3 cleanly separates "1" from background
+// noise (~0-2 events per "0" window). e462c3e lowered this to 1 to compensate
+// for its inflated latency band; reverting both at once restores the original
+// signal-to-noise ratio.
+#define ASSERT_THRESH   3
 
 const int NUM_CHANNEL = 1;
 const int NUM_RANKS = 2;

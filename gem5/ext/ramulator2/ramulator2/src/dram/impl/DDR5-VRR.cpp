@@ -510,11 +510,14 @@ class DDR5VRR : public IDRAM, public Implementation {
         { 60,  60,  60 }, // tRRFsb
       };
       m_BRC = param_group("RFM").param<int>("BRC").default_val(2);
-      m_timing_vals("nDRFMab") = 5000;
-      m_timing_vals("nDRFMsb") = 5000;
-      m_timing_vals("nRFM1") = 5000;
-      m_timing_vals("nRFM2") = 5000;
-      m_timing_vals("nRFMsb") = 5000;
+      m_timing_vals("nDRFMab") = 2 * m_BRC * JEDEC_rounding_DDR5(tRRFsb_TABLE[0][density_id], tCK_ps);
+      m_timing_vals("nDRFMsb") = 2 * m_BRC * JEDEC_rounding_DDR5(tRRFsb_TABLE[1][density_id], tCK_ps);
+      // NOTE: nRFM1/nRFM2/nRFMsb are intentionally left at the values set above
+      // (derived from the JEDEC RFC table). Commit e462c3e overrode all five of
+      // these to 5000 mem cycles to make DREAM-C's DRFMab events more visible
+      // from userspace, but that change broke the RFM POC because it pushed
+      // every RFM stall outside the userspace receiver's latency band.
+      // See figures/figure6bak.pdf for the working RFM POC under these values.
 
       // DDR5 Per Row Activation Counting (PRAC)
       // when enabled, PRAC modifies a bunch of timing parameters

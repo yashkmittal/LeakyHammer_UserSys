@@ -155,16 +155,24 @@ rebuild depends on what you changed:
 | You edited... | Then rebuild...                  | Command |
 |---|---|---|
 | C++ in `gem5/attack-scripts/` | the userspace sender/receiver binaries | `./compile_attack_scripts.sh` (all) or `./compile-scripts/recompile_<preset>.sh` (one) |
-| C++ in `gem5/ext/ramulator2/...` (e.g. `dream.cpp`) | `libramulator.so` **and** relink `gem5.opt` | `./rebuild.sh --all` (or `--ramulator` then `--gem5`) |
+| C++ in `gem5/ext/ramulator2/...` (e.g. `DDR5-VRR.cpp`, `dream.cpp`, any plugin) | `libramulator.so` only | `./rebuild.sh --ramulator` |
+| Public ABI of `libramulator.so` (function signature on an exported symbol, or a header included from gem5) | `libramulator.so` **and** relink `gem5.opt` | `./rebuild.sh --all` (or `--ramulator` then `--gem5`) |
 | YAML in `gem5/configs/` | nothing — configs are read at runtime | (no rebuild) |
+
+`gem5.opt` dynamically links `libramulator.so` (`gem5/ext/ramulator2/SConscript`
+sets `LIBS=['ramulator']` + `RPATH=[ramulator2_path]`), so for any change that
+*only* touches Ramulator's internal source files (DRAM model timing values,
+plugin internals, scheduler internals, etc.) `--ramulator` is enough — the
+next `gem5.opt` invocation picks up the rebuilt `.so`. You only need `--all`
+when you change something gem5 itself compiles against.
 
 So a typical "I changed the DREAM plugin" cycle is:
 
 ```bash
-# 1. Rebuild Ramulator + gem5 (5-10 min, since rebuild.sh uses -j8 / -j2):
+# 1. Rebuild just Ramulator (~1-2 min):
 docker run --rm --user "$(id -u):$(id -g)" \
     -v "$PWD/gem5":/app leakyhammer_artifact \
-    "./rebuild.sh --all"
+    "./rebuild.sh --ramulator"
 
 # 2. Optionally rebuild attack binaries too if you also touched attack-scripts/:
 docker run --rm --user "$(id -u):$(id -g)" \
@@ -173,9 +181,20 @@ docker run --rm --user "$(id -u):$(id -g)" \
 ```
 
 You can sanity-check that the rebuild actually happened by comparing
-`stat -c '%y' gem5/build/X86/gem5.opt
-gem5/ext/ramulator2/ramulator2/libramulator.so` against the mtime of the
-file you edited — both binaries should be *newer* than your source change.
+`stat -c '%y' gem5/ext/ramulator2/ramulator2/libramulator.so` against the
+mtime of the file you edited — `libramulator.so` should be *newer* than your
+source change.
+
+> **Build flavor note:** `rebuild.sh` always builds Ramulator with
+> `-DCMAKE_BUILD_TYPE=Debug`. The `libramulator.so` originally baked into the
+> Docker image (`leakyhammer_artifact.tar`) was almost certainly Release. This
+> doesn't change *correctness* (DRAM timing is in mem-cycles, fully
+> deterministic), but it can shift per-window event counts vs. the originally
+> shipped figures (e.g. exact `[RECV] (N RFMs)` counts in the RFM POC differ
+> slightly from `figures/figure6bak.pdf` even though the decoded bits match
+> 1:1). If you need exact-count parity, change `-DCMAKE_BUILD_TYPE=Debug` to
+> `Release` in `rebuild.sh` and nuke `gem5/ext/ramulator2/ramulator2/build/`
+> before rebuilding.
 
 ### 4.3 Generate the run scripts
 
@@ -314,6 +333,7 @@ sub-channel**. Concretely, this means:
 |------------|--------|
 | (initial)  | Per-bank gang counters (`m_tusc[bank][gang]`), bulk reset every 64 ms. Deviated from the paper's cross-bank shared DCT design. |
 | 2026-04-25 | Rewrote to the paper's cross-bank shared DCT with randomized grouping, vertical sharing, and gradual reset. |
+| 2026-04-25 (later) | **Reverted simulator-side timing inflation introduced in commit `e462c3e`.** That commit had bumped `nDRFMab`/`nDRFMsb`/`nRFM*` in `DDR5-VRR.cpp` to 5000 mem cycles (~3 µs each) to make DRFMab events conspicuous from userspace, and inflated three companion latency-band constants in `rowhammer-side.hh` (`PERIODIC_CAP_NS` 1300→8000, `PERIODIC_CAP_NS_RFM` 550→6000, `ACCESS_CAP_NS` 250→2000) plus dropped `rowhammer-rfm-receiver.cc` `ASSERT_THRESH` from 3→1. **Side effect:** broke the RFM POC (decoded all-zeros — see `figures/figure6.broken.pdf` vs `figure6bak.pdf`) because the inflated band missed the larger-but-rarer RFM stalls. Revert restored `nDRFMab` to JEDEC formula `2*BRC*tRRFsb` (~150 ns) and the userspace bands/threshold to the artifact defaults; RFM POC now decodes `MICRO` cleanly. **DREAM is currently broken under this revert** (its detection band `(DREAM_DRFMAB_CAP_NS=2000, PERIODIC_CAP_NS=1300)` is now empty — see §7 step 1 for the re-tuning plan). |
 
 ### 5.2 Sender + receiver
 
@@ -351,14 +371,17 @@ and was not modified.
 
 | Preset | Noiseless capacity (ours) | Paper claim | Notes |
 |--------|----------------------------|-------------|-------|
-| RFM    | **48.77 Kbps**             | 48.7 Kbps   | Matches paper exactly. |
+| RFM    | **48.77 Kbps** (matrix, pre-`e462c3e`-revert); RFM POC decodes `MICRO` cleanly post-revert | 48.7 Kbps   | Matches paper exactly. Matrix CSVs/figures dated before 2026-04-25 are consistent. |
 | PRAC   | ~27.6 Kbps                 | 39.0 Kbps   | Below paper — not yet investigated. PRAC has ~3.6% baseline BER from receiver self-noise (separate issue from drift). |
-| DREAM  | ~33 Kbps (noiseless), 20.4 Kbps (under noise) | (new) | Most noise-robust of the three. Residual 2–8% BER per pattern. |
+| DREAM  | **STALE / BROKEN** — old numbers (~33 Kbps noiseless, 20.4 Kbps under noise) were generated against the inflated `nDRFMab=5000` simulator state. After the 2026-04-25 timing revert (§5.1.2) DREAM decoders see no events; both POC and matrix produce all-zeros until the detection band is re-tuned. | (new) | See §7 step 1 for re-tuning plan. |
 
 Figures live in `gem5/figures/`:
 - `figure4.pdf` — PRAC channel capacity vs noise intensity
+- `figure6.pdf` — RFM POC (current; matches `figure6bak.pdf` at the bit level, per-window RFM counts differ — Debug-build artifact, see §4.2)
+- `figure6.broken.pdf` — RFM POC against the inflated-timing state, all-zero decode (kept for reference)
+- `figure6bak.pdf` — pre-`e462c3e` working RFM POC reference (Apr 3, original Release `libramulator.so`)
 - `figure7.pdf` — RFM channel capacity vs noise intensity
-- `figure7_dream.pdf` — DREAM, same axes as figure7 (our addition)
+- `figure7_dream.pdf` — DREAM, same axes as figure7 (**stale, regenerate after re-tune**)
 
 ---
 
@@ -378,17 +401,32 @@ whether DREAM is more or less leaky than the industry-standard defenses.
 - Reproduced the paper's RFM noiseless capacity (48.77 vs 48.7 Kbps).
 
 **Open / likely next steps:**
-1. **Re-run the full DREAM matrix against the rewritten plugin** (see §5.1
-   changelog). Old DREAM CSVs/figures in `gem5/results/dream/` and
-   `gem5/figures/figure7_dream.pdf` were generated with the per-bank
-   plugin and are not directly comparable to anything we run from
-   2026-04-25 onward. Recommended sequence:
+1. **Re-tune the DREAM detection band against the now-restored ~150 ns
+   DRFMab.** After the 2026-04-25 timing revert (§5.1.2), `nDRFMab` is back
+   to the JEDEC formula `2*BRC*tRRFsb` ≈ 240 mem-cycles ≈ 150 ns DRAM-side.
+   The userspace probe will see this amplified by the controller's queue
+   stall to roughly the same `(250, 550)` ns band as RFM events — meaning
+   *latency magnitude alone no longer distinguishes a DRFMab from an RFM*.
+   Concrete sub-tasks (see also "Plan for §7 step 1" below):
+   - Instrument `dream_receive_count` to print a latency histogram per
+     window across a few representative configs (DREAM only, DREAM+noise)
+     so we know the actual post-revert spike distribution.
+   - Decide on a new discriminator: most likely **rank-scope** (DRFMab
+     stalls *every* bank in the rank, RFM stalls only the addressed bank)
+     by probing two banks in different bank-groups and requiring
+     simultaneous spikes; or **rate** (DRFMab fires once per `threshold`
+     ACTs into the gang, much rarer than per-bank RFM under the same load).
+   - Update `DREAM_DRFMAB_CAP_NS`/`DREAM_DRFMAB_UPPER_NS` in
+     `rowhammer-side.hh` and the `dream_send`/`dream_receive_count`
+     bodies in `rowhammer-side.cc`.
+   - Wipe stale DREAM results, re-run the matrix (`grep dream`), re-plot.
+2. **Re-run the full DREAM matrix** once the detection band is fixed.
+   Recommended sequence:
    ```bash
-   # Rebuild Ramulator + gem5 (the plugin is statically linked into
-   # libramulator.so, which gem5.opt links in turn). recompile_dream.sh is
-   # NOT enough -- it only rebuilds the attack binaries.
    docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/gem5":/app \
-       leakyhammer_artifact "./rebuild.sh --all"
+       leakyhammer_artifact "./rebuild.sh --ramulator"
+   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/gem5":/app \
+       leakyhammer_artifact "./compile_attack_scripts.sh"
 
    # Wipe stale DREAM results.
    docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/gem5":/app \
@@ -399,22 +437,21 @@ whether DREAM is more or less leaky than the industry-standard defenses.
    cat run.sh | grep dream | sed 's/^sh //' | \
        xargs -I{} -P4 sh -c 'echo "[$(date +%H:%M:%S)] START {}"; sh {}; echo "[$(date +%H:%M:%S)] DONE  {}"'
 
-   # Re-parse + plot.
    uv run --with pandas --with numpy --with matplotlib --with seaborn \
        python3 result-scripts/parse_and_print.py
    ```
-2. Investigate the PRAC noiseless gap (we get ~28 Kbps, paper gets 39 Kbps).
+3. Investigate the PRAC noiseless gap (we get ~28 Kbps, paper gets 39 Kbps).
    This is *not* the drift bug; it looks like receiver self-noise inside
    `prac_receive`. Out of scope for the recent work but the obvious next
    target.
-3. Sweep DREAM's `threshold` and `vertical_sharing` parameters in
+4. Sweep DREAM's `threshold` and `vertical_sharing` parameters in
    `dream.yaml` to characterise how DREAM's detection sensitivity trades
    off against channel capacity. The paper studies T_RH ∈ {125, 250, 500,
    1000} which corresponds to `threshold` ∈ {62, 125, 250, 500} and
    `vertical_sharing` ∈ {1, 2, 4, 8}.
-4. Cross-validate the `figure7_dream.pdf` numbers by hand-computing
-   capacity from `noise_ber_dream.csv`.
-5. Optionally: run `setup_recommended_subset.py` instead of `setup_test.py`
+5. Cross-validate the `figure7_dream.pdf` numbers by hand-computing
+   capacity from `noise_ber_dream.csv` (after step 2 regenerates them).
+6. Optionally: run `setup_recommended_subset.py` instead of `setup_test.py`
    to do the full paper-style 16-rate sweep (it currently uses a 3- or
    4-rate subset to keep wall time down).
 
@@ -445,10 +482,12 @@ whether DREAM is more or less leaky than the industry-standard defenses.
   file as the sources of truth.
 - **`compile-scripts/recompile_*.sh` only rebuild attack binaries, not the
   Ramulator plugin.** If you edited a `.cpp` under
-  `gem5/ext/ramulator2/` (e.g. `dream.cpp`), you must run
-  `./rebuild.sh --all` to relink `libramulator.so` and `gem5.opt`. See §4.2.
-  An earlier version of this file said the opposite — that was wrong.
-  Symptom of running with stale plugin: result CSVs come out *bit-identical*
+  `gem5/ext/ramulator2/` (e.g. `dream.cpp`, `DDR5-VRR.cpp`), you must run
+  `./rebuild.sh --ramulator` to relink `libramulator.so`. `gem5.opt` does
+  *not* need to be rebuilt for internal Ramulator changes — it dynamically
+  links the `.so` via `RPATH`. Use `--all` only when changing Ramulator's
+  public ABI or a header gem5 itself includes. See §4.2.
+  Symptom of running with a stale `.so`: result CSVs come out *bit-identical*
   to a previous run despite source changes.
 - **`txt.txt` at the repo root is from a very old run.** Ignore it.
   Always read the latest data from `gem5/results/*.csv` and the latest
@@ -466,7 +505,11 @@ whether DREAM is more or less leaky than the industry-standard defenses.
 ## 9. Quick reference — common one-liners
 
 ```bash
-# Recompile DREAM only
+# Rebuild Ramulator only (after editing any .cpp under ext/ramulator2/)
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/gem5":/app leakyhammer_artifact \
+    "./rebuild.sh --ramulator"
+
+# Recompile DREAM attack binaries only (after editing dream-*.cc in attack-scripts/)
 docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/gem5":/app leakyhammer_artifact \
     "./compile-scripts/recompile_dream.sh"
 

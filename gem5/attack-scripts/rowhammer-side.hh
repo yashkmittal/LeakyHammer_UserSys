@@ -12,9 +12,19 @@
 
 #define FLUSH()                 fflush(stdout)
 #define SYS_MMAP_ATK            451
-#define PERIODIC_CAP_NS         8000
-#define PERIODIC_CAP_NS_RFM     6000
-#define ACCESS_CAP_NS           2000
+// Latency-band constants used by all PRAC/RFM receivers to classify a probe
+// access by its observed CPU-visible latency.
+//   - latency > ACCESS_CAP_NS         -> above a normal row-miss
+//   - latency > PERIODIC_CAP_NS_RFM   -> looks like a back-off (PRAC) rather than RFM
+//   - latency > PERIODIC_CAP_NS       -> definitely a back-off / long stall
+// These values were the artifact's defaults and produce a working RFM POC
+// (see figures/figure6bak.pdf). They were briefly inflated to 2000/6000/8000
+// in commit e462c3e ("[broken] added support for DREAM ...") to accommodate a
+// matching nDRFMab=5000 mem-cycle inflation in DDR5-VRR.cpp; that change broke
+// the RFM POC and has been reverted alongside the simulator revert.
+#define PERIODIC_CAP_NS         1300 // 1000
+#define PERIODIC_CAP_NS_RFM     550
+#define ACCESS_CAP_NS           250
 #define SYNC_ITERS              4
 #define TREFI                   3900
 
