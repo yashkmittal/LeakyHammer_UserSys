@@ -48,6 +48,10 @@
 #define DREAM_ASSERT_THRESH   0       // Sender produces ~1 DRFMab per "1" window; require >0 spikes (i.e. >=1) to decode "1"
 #define DREAM_TXN_PERIOD      50000   // Window size (ns); 40 hammers ~20us => 2+ DRFMab per window
 
+// SRS todo
+#define SRS_SWAP_CAP_NS 3000
+#define SRS_ASSERT_THRESH 1
+
 long mmap_atk(size_t mem_size, long paddr);
 uint32_t fine_grained_sleep(uint32_t sleep_ns);
 void sleep_until(uint64_t target);
@@ -93,5 +97,11 @@ bool dream_receive(std::vector<char*>& row_ptrs, uint32_t timeout);
 // probing (probe_interval_ns spacing). Returns raw spike count for rate-based decoding.
 int  dream_receive_count(std::vector<char*>& row_ptrs, uint32_t timeout,
                          uint32_t probe_interval_ns);
+
+
+// SRS: 
+void srs_send(std::vector<char*>& row_ptrs, uint32_t timeout);
+bool srs_receive(std::vector<char*>& row_ptrs, uint32_t timeout);
+
 
 #endif  // ROWHAMMER_SIDECH_H_
