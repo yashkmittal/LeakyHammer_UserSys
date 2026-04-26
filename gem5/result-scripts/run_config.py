@@ -87,6 +87,13 @@ def get_preset_variables(preset, is_noise=False):
       CFG_FILE = f"{BASE_DIR}/configs/rhsc/ramulator/dream.yaml"
       SENDER = f"{BASE_DIR}/attack-binaries/dream_sender"
       RECEIVER = f"{BASE_DIR}/attack-binaries/dream_receiver"
+      # 20000 ns is the empirically optimal window for DREAM with the
+      # paper-faithful cross-bank shared DCT plugin. We swept 25000 once
+      # as a sanity check (2026-04-25): raw rate dropped 20% as expected,
+      # but baseline BER nearly doubled (0.028 -> 0.050) because the
+      # receiver's probe loop has more time to self-trigger the shared
+      # gang counter. Net capacity dropped from 16.0 -> 13.2 Kbps. Don't
+      # raise this casually -- see chat log / AGENTS.md changelog.
       TXN_PERIOD = 20000
       if is_noise:
           ACCESS_RATES = [200, 263, 325]

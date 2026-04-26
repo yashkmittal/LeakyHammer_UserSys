@@ -29,7 +29,25 @@ MemorySystem:
     plugins:
       - ControllerPlugin:
           impl: DREAM
+          # T_TH from the paper. Paper convention: T_TH = T_RH / 2 (e.g. 250
+          # for T_RH=500). 40 is what we used historically with the per-bank
+          # plugin; under the new cross-bank shared DCT, every counter sees
+          # ~32x more ACTs, so this is effectively a much more aggressive
+          # mitigation. Bump this if attacker SNR collapses under the rewrite.
           threshold: 40
+          # Vertical sharing factor (paper §5.5). 1 -> gang of 32 rows,
+          # 2 -> 64, 4 -> 128, 8 -> 256. The DCT shrinks by this factor and
+          # the plugin issues this many DRFMab commands per threshold hit.
+          vertical_sharing: 1
+          # Grouping function: 'random' (paper default, recommended) hashes
+          # RowID with a per-bank XOR mask. 'set_assoc' uses the raw RowID
+          # and produces hot counters under MOP-style address mapping.
+          grouping: random
+          # tREFW. Used to spread the gradual round-robin DCT reset.
+          reset_period_ns: 64000000
+          # Determinism for the per-bank XOR masks.
+          seed: 42
+          # Back-compat alias: sanity-checked against 32 * vertical_sharing.
           gang_size: 32
           debug: false
 
