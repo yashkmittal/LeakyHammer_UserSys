@@ -692,7 +692,7 @@ void srs_send(std::vector<char*>& row_ptrs, uint32_t timeout) {
         uint64_t lat = ns2 - ns1;
 
         // swap detected
-        if (lat > SRS_SWAP_CAP_NS && lat < PERIODIC_CAP_NS) {
+        if (lat > SRS_SWAP_CAP_NS && lat < SRS_PERIODIC_CAP_NS) {
             return;
         }
     }
@@ -714,7 +714,7 @@ bool srs_receive(std::vector<char*>& row_ptrs, uint32_t timeout) {
 
         uint64_t lat = ns2 - ns1;
 
-        if (lat > SRS_SWAP_CAP_NS && lat < PERIODIC_CAP_NS) {
+        if (lat > SRS_SWAP_CAP_NS && lat < SRS_PERIODIC_CAP_NS) {
             swap_ctr++;
         }
     }

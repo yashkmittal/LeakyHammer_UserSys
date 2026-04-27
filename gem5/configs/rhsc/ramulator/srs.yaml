@@ -31,7 +31,7 @@ MemorySystem:
           impl: SRS
           num_hrt_entries: 1700
           num_rit_entries: 6800
-          rss_threshold: 800
+          rss_threshold: 50
           debug: false
 
 

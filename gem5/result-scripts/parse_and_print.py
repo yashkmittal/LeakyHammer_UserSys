@@ -69,6 +69,7 @@ def main():
     parse_simulations("PRAC", is_noise=True)
     parse_simulations("RFM", is_noise=True)
     parse_simulations("DREAM", is_noise=True)
+    parse_simulations("SRS", is_noise=True)
 
     print("\nNoise channel summary:")
     print_results_noise("PRAC")

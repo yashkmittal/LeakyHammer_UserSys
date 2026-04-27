@@ -50,6 +50,7 @@
 
 // SRS todo
 #define SRS_SWAP_CAP_NS 3000
+#define SRS_PERIODIC_CAP_NS 500000
 #define SRS_ASSERT_THRESH 1
 
 long mmap_atk(size_t mem_size, long paddr);

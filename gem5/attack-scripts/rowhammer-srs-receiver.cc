@@ -53,7 +53,7 @@ int main(int argc, char *argv[]) {
 
     srand(0xdead);
     // N_CH, N_RA, CH, RA, BG, BA, RO, CO
-    target = DDR5_16Gb_x8(NUM_CHANNEL, NUM_RANKS, 0, 1, 7, 3, 0, 0);
+    target = DDR5_16Gb_x8(NUM_CHANNEL, NUM_RANKS, 0, 1, 0, 0, 0, 0);
 
     std::vector<char*> row_ptrs(ROW_COUNT, 0);
     for (int i = 0; i < ROW_COUNT; i++) {
