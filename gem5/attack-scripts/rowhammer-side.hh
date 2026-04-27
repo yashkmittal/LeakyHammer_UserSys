@@ -113,6 +113,7 @@ int  dream_receive_count(std::vector<char*>& row_ptrs, uint32_t timeout,
 // SRS: 
 void srs_send(std::vector<char*>& row_ptrs, uint32_t timeout);
 bool srs_receive(std::vector<char*>& row_ptrs, uint32_t timeout);
+bool srs_receive_poc(std::vector<char*>& row_ptrs, uint32_t timeout);
 
 
 #endif  // ROWHAMMER_SIDECH_H_

@@ -721,3 +721,27 @@ bool srs_receive(std::vector<char*>& row_ptrs, uint32_t timeout) {
 
     return swap_ctr > SRS_ASSERT_THRESH;
 }
+
+bool srs_receive_poc(std::vector<char*>& row_ptrs, uint32_t timeout) {
+    uint64_t start = m5_rpns();
+
+    char* probe = row_ptrs[0];
+    int swap_ctr = 0;
+
+    while (m5_rpns() - start < timeout) {
+        asm volatile("clflush (%0)" : : "r"(probe) : "memory");
+
+        uint64_t ns1 = m5_rpns();
+        *(volatile char*)probe;
+        uint64_t ns2 = m5_rpns();
+
+        uint64_t lat = ns2 - ns1;
+
+        if (lat > SRS_SWAP_CAP_NS && lat < SRS_PERIODIC_CAP_NS) {
+            swap_ctr++;
+        }
+    }
+
+    std::printf("[RECV] Received: %d (%d SWAPs)\n", swap_ctr > SRS_ASSERT_THRESH, swap_ctr); FLUSH();
+    return swap_ctr > SRS_ASSERT_THRESH;
+}
