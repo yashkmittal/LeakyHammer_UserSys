@@ -50,6 +50,13 @@
 // must stay below 40 ACTs/64ms / (16ms attack / 64ms) = 10 ACTs/16ms.
 // Choice: P=10 probes/window (probe_interval=2us so any 7us stall catches >=3 probes),
 // N=1024 gangs -> 8000/1024 = 7.8 ACTs/gang/16ms (under threshold).
+//
+// NOTE: With txn_period=20us the schedule above (10 probes * 2us) packs the
+// entire window with no slack for variable-latency events (DRFMab stalls,
+// periodic refreshes). Empirically the receiver overran by ~200us per worst
+// window, drifting bit alignment off the sender's clock. We address this by
+// running with a larger txn_period (set in run_config.py for DREAM) which
+// gives the same 10-probe schedule plenty of headroom.
 #define ROW_COUNT          1024
 #define GANG_SIZE          32
 #define PROBE_INTERVAL_NS  2000  // 2us spacing -> ~10 probes per 20us window
@@ -69,7 +76,12 @@ int main(int argc, char *argv[]) {
     uint32_t dream_txn_period = std::atoi(argv[1]);
     int msg_bytes = std::atoi(argv[2]);
     char data_pattern = std::strtol(argv[3], NULL, 16);
-    uint32_t dream_timeout = dream_txn_period - 500;
+    // Leave 8us of margin: dream_receive_count's loop check is at the top of
+    // each iteration, but a probe already inside the loop can take up to ~7us
+    // (a DRFMab stall) to complete after the timeout has elapsed. Without the
+    // margin, almost every window overruns by 3-7us and triggers resync,
+    // discarding bits unnecessarily.
+    uint32_t dream_timeout = dream_txn_period - 8000;
 
     srand(0xdead);
     // N_CH, N_RA, CH, RA, BG, BA, RO, CO
@@ -96,18 +108,42 @@ int main(int argc, char *argv[]) {
 
     std::printf("[DREAM-RECV] End of first window: %lu\n", next_window); FLUSH();
     int min_sleep_assert = std::numeric_limits<int>::max();
+    int n_resyncs = 0;
+    int total_skipped_bits = 0;
     uint64_t ns1 = m5_rpns();
     for (size_t i = 0; i < message.size(); i++) {
         int n_spikes = dream_receive_count(row_ptrs, dream_timeout, PROBE_INTERVAL_NS);
         spike_counts[i] = n_spikes;
         message[i] = (n_spikes > DREAM_DECODE_THRESH);
         next_window += dream_txn_period;
-        min_sleep_assert = std::min<int>(min_sleep_assert, (int)(next_window - m5_rpns()));
+        int slack = (int)(next_window - m5_rpns());
+        min_sleep_assert = std::min<int>(min_sleep_assert, slack);
+
+        // Phase-resync: if the receive loop overran the next window boundary by
+        // one or more full periods, the receiver is sampling stale bits from
+        // the sender's past. Skip ahead by an integer number of periods so the
+        // next iteration is grid-aligned with the sender's bit clock again.
+        // The skipped indices are filled with 0 (we couldn't observe them).
+        uint64_t now = m5_rpns();
+        if (now > next_window) {
+            uint64_t behind = now - next_window;
+            uint64_t skip = (behind + dream_txn_period - 1) / dream_txn_period;
+            for (uint64_t s = 0; s < skip && i + 1 < message.size(); s++) {
+                ++i;
+                message[i] = false;
+                spike_counts[i] = -1;
+                ++total_skipped_bits;
+            }
+            next_window += skip * dream_txn_period;
+            ++n_resyncs;
+        }
         sleep_until(next_window);
     }
     uint64_t ns2 = m5_rpns();
     uint64_t latency = ns2 - ns1;
     std::printf("[DREAM-RECV] MinSleepAssert: %d\n", min_sleep_assert);
+    std::printf("[DREAM-RECV] Resyncs: %d (%d bits skipped)\n",
+                n_resyncs, total_skipped_bits);
 
     std::printf("[DREAM-RECV] Received in %ld ns\n", latency);
     std::printf("[DREAM-RECV] Binary: ");
