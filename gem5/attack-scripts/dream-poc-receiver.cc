@@ -37,11 +37,27 @@
 #include "rowhammer-side.hh"
 
 // Spread-row, rate-based decoder (same parameters as the BER-matrix
-// dream_receiver). See rowhammer-dream-receiver.cc for the full rationale.
-#define ROW_COUNT          1024
-#define GANG_SIZE          32
-#define PROBE_INTERVAL_NS  2000
-#define DREAM_DECODE_THRESH 0
+// dream_receiver). See rowhammer-dream-receiver.cc for the full rationale,
+// including how we pick rows under the plugin's RANDOM grouping function
+// to (a) span ROW_COUNT distinct DCT entries and (b) avoid colliding with
+// the sender's target DCT entry.
+#define ROW_COUNT             1024
+#define GANG_SIZE             32
+#define PROBE_INTERVAL_NS     2000
+#define DREAM_DECODE_THRESH   0
+
+#define DREAM_SEED            42
+#define DREAM_DCT_ENTRIES     65536
+#define DREAM_BANKS_PER_GROUP 4
+#define DREAM_BANKS_PER_RANK  32
+
+#define RECV_RANK   1
+#define RECV_BG     7
+#define RECV_BA     3
+
+#define SENDER_RANK 1
+#define SENDER_BG_A 0
+#define SENDER_BA_A 0
 
 const int NUM_CHANNEL = 1;
 const int NUM_RANKS = 2;
@@ -60,25 +76,54 @@ int main(int argc, char *argv[]) {
     std::string expected_msg = (argc >= 5) ? std::string(argv[4]) : "UTECE";
     int msg_bytes = (int) expected_msg.size();
 
-    // Same 8us margin as the BER-matrix receiver.
-    uint32_t dream_timeout = dream_txn_period - 8000;
+    // Same 2us margin as the BER-matrix receiver -- see the long comment in
+    // rowhammer-dream-receiver.cc for why the older 8us was a bug post-revert.
+    uint32_t dream_timeout = dream_txn_period - 2000;
 
     srand(0xdead);
-    // BG=7, Bank=3 -- completely different bank from the sender (BG=0, Bank=0).
-    // ROW_COUNT rows at row IDs {0, GANG_SIZE, 2*GANG_SIZE, ...} so each
-    // row sits in its own DCT gang -> diluted self-trigger rate.
-    target = DDR5_16Gb_x8(NUM_CHANNEL, NUM_RANKS, 0, 1, 7, 3, 0, 0);
+
+    // Mirror the BER-matrix receiver: replicate the plugin's mask table,
+    // compute the sender's target DCT entry (so we avoid it), and lay out
+    // ROW_COUNT distinct probe rows in the receiver's bank.
+    auto masks = dream_compute_random_masks(
+        DREAM_SEED, NUM_RANKS, DREAM_BANKS_PER_RANK, DREAM_DCT_ENTRIES);
+    int recv_bank_idx   = dream_bank_in_rank(RECV_BG, RECV_BA,
+                                             DREAM_BANKS_PER_GROUP);
+    int sender_bank_idx = dream_bank_in_rank(SENDER_BG_A, SENDER_BA_A,
+                                             DREAM_BANKS_PER_GROUP);
+    int recv_mask     = masks[RECV_RANK][recv_bank_idx];
+    int sender_mask_a = masks[SENDER_RANK][sender_bank_idx];
+    int forbidden_recv_row = sender_mask_a ^ recv_mask;
+
+    std::printf("[DREAM-POC-RECV] random_masks: recv(rank=%d,bg=%d,ba=%d -> %d)=%d "
+                "sender_dct_idx=%d forbidden_recv_row=%d\n",
+                RECV_RANK, RECV_BG, RECV_BA, recv_bank_idx, recv_mask,
+                sender_mask_a, forbidden_recv_row); FLUSH();
+
+    target = DDR5_16Gb_x8(NUM_CHANNEL, NUM_RANKS, 0, RECV_RANK,
+                          RECV_BG, RECV_BA, 0, 0);
 
     std::vector<char*> row_ptrs(ROW_COUNT, 0);
+    int n_replaced = 0;
     for (int i = 0; i < ROW_COUNT; i++) {
-        target.row = i * GANG_SIZE;
+        int row_id = i * GANG_SIZE;
+        if (row_id == forbidden_recv_row) {
+            row_id = ROW_COUNT * GANG_SIZE;
+            n_replaced++;
+        }
+        assert(row_id >= 0 && row_id < DREAM_DCT_ENTRIES);
+        target.row = row_id;
         row_ptrs[i] = (char*) mmap_atk(alloc_size, target.to_physical());
         assert(row_ptrs[i] != MAP_FAILED);
+    }
+    if (n_replaced > 0) {
+        std::printf("[DREAM-POC-RECV] Replaced %d colliding probe row(s) with row %d\n",
+                    n_replaced, ROW_COUNT * GANG_SIZE); FLUSH();
     }
 
     std::printf("[DREAM-POC-RECV] expected_msg: '%s' (%d chars, %d bits)\n",
                 expected_msg.c_str(), msg_bytes, msg_bytes * 8);
-    std::printf("[DREAM-POC-RECV] spread-row: rows=%d gang_size=%d "
+    std::printf("[DREAM-POC-RECV] spread-row (random grouping): rows=%d gang_size=%d "
                 "probe_interval=%dns decode_thresh=%d\n",
                 ROW_COUNT, GANG_SIZE, PROBE_INTERVAL_NS, DREAM_DECODE_THRESH);
     std::printf("[DREAM-POC-RECV] Timeout: %d\n", dream_timeout); FLUSH();
@@ -96,7 +141,7 @@ int main(int argc, char *argv[]) {
     int total_skipped_bits = 0;
     uint64_t ns1 = m5_rpns();
     for (size_t i = 0; i < message.size(); i++) {
-        int n_spikes = dream_receive_count(row_ptrs, dream_timeout, PROBE_INTERVAL_NS);
+        int n_spikes = dream_receive_count_random_gang(row_ptrs, dream_timeout, PROBE_INTERVAL_NS);
         spike_counts[i] = n_spikes;
         message[i] = (n_spikes > DREAM_DECODE_THRESH);
         next_window += dream_txn_period;
@@ -133,6 +178,31 @@ int main(int argc, char *argv[]) {
     for (bool bit : message) {
         std::printf("%d", (int) bit);
     }
+    std::printf("\n"); FLUSH();
+
+    // Per-window spike-count histogram & summary (mirrors the BER receiver,
+    // for tuning DECODE_THRESH and diagnosing the channel's noise floor).
+    int max_count = 0;
+    long total_spikes = 0;
+    for (int c : spike_counts) {
+        if (c > max_count) max_count = c;
+        total_spikes += c;
+    }
+    std::vector<int> hist(max_count + 1, 0);
+    for (int c : spike_counts) hist[c]++;
+    std::printf("[DREAM-POC-RECV] Spike histogram (count: nWindows): ");
+    for (int v = 0; v <= max_count; v++) {
+        std::printf("%d:%d ", v, hist[v]);
+    }
+    std::printf("\n");
+    std::printf("[DREAM-POC-RECV] Total spikes: %ld over %zu windows (mean %.2f)\n",
+                total_spikes, message.size(),
+                (double) total_spikes / (double) message.size());
+
+    // Per-window spike-count trace, aligned with sent bits, for diagnosing
+    // whether spike rate is correlated with sender hammering.
+    std::printf("[DREAM-POC-RECV] Spike counts: ");
+    for (int c : spike_counts) std::printf("%d ", c);
     std::printf("\n"); FLUSH();
 
     // Repack into ASCII bytes (MSB-first, same as sender) and print.

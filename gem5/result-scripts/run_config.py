@@ -107,7 +107,13 @@ CMD_ARGS = [
     "--sys-clock=1GHz",
     "--cpu-clock=3GHz",
     "--mem-type=Ramulator2",
-    "--mem-size=8GB",
+    # 32 GB needed for the DREAM matrix sender's two-bank gang collision
+    # (row_b can be up to 65535, which puts the physical address at ~16 GB
+    # under DDR5_16Gb_x8). PRAC/RFM senders/receivers and the noise generator
+    # all pin (bg=7, ba=3, row=0..a few), whose addresses fit comfortably in
+    # 8 GB or 32 GB -- the mem-size only sets the address-space ceiling and
+    # doesn't affect simulated DRAM timing, so PRAC/RFM results are invariant.
+    "--mem-size=32GB",
     "--caches",
     "--l2cache",
     "--num-l2caches=1",
@@ -132,7 +138,7 @@ NOISE_CMD_ARGS = [
     "--sys-clock=1GHz",
     "--cpu-clock=3GHz",
     "--mem-type=Ramulator2",
-    "--mem-size=8GB",
+    "--mem-size=32GB",
     "--caches",
     "--l2cache",
     "--num-l2caches=1",

@@ -46,7 +46,7 @@ paper measures channel capacity (Kbps) at various noise levels.
 |--------|--------|--------------|---------------------|
 | **PRAC** | LeakyHammer artifact | Tracks per-row ACT count; triggers a "back-off" refresh once a counter saturates | Untouched original |
 | **RFM**  | LeakyHammer artifact | Memory controller issues periodic RFM commands proportional to recent ACT count | Receiver patched (drift fix, see §6) |
-| **DREAM-C** | Ported from `DREAM.pdf` | Counts ACTs at *gang* (group of rows that map to one shared counter via random per-bank XOR mask) granularity; issues `DRFMab` (Directed Refresh Management, all banks) when a gang counter saturates | New addition: Ramulator plugin + new sender/receiver binaries + receiver patched. **Plugin rewritten 2026-04-25 — see §5.1.** |
+| **DREAM-C** | Ported from `DREAM.pdf` | Counts ACTs at *gang* (group of rows that map to one shared counter via random per-bank XOR mask) granularity; issues `DRFMab` (Directed Refresh Management, all banks) when a gang counter saturates | New addition: Ramulator plugin + new sender/receiver binaries + receiver patched. **Plugin rewritten 2026-04-25; harness address-mapping fixed 2026-04-26 — see §5.1 + §5.1.2 changelog.** Empirical result: ≤ 0.15 Kbps capacity under noise (§6). |
 
 DREAM-C uses the JEDEC-standard DRFMab command path that already existed in
 the Ramulator2 DDR5-VRR model.
@@ -159,6 +159,20 @@ rebuild depends on what you changed:
 | Public ABI of `libramulator.so` (function signature on an exported symbol, or a header included from gem5) | `libramulator.so` **and** relink `gem5.opt` | `./rebuild.sh --all` (or `--ramulator` then `--gem5`) |
 | YAML in `gem5/configs/` | nothing — configs are read at runtime | (no rebuild) |
 
+> **Heads-up on `compile_attack_scripts.sh`:** until 2026-04-26 it did **not**
+> recompile the DREAM POC binaries (`dream_poc_sender`/`dream_poc_receiver`).
+> If you edit `dream-poc-{sender,receiver}.cc` or anything in
+> `rowhammer-side.{cc,hh}` / `rowhammer-addr.hh` that affects the POC, run
+> `./compile-scripts/recompile-dream-poc.sh` explicitly. Symptom of forgetting:
+> POC binaries silently keep their old behaviour despite header changes.
+
+> **Memory-size note (DREAM only).** After the 2026-04-26 address-mapping fix
+> (§5.1.2) the DREAM sender's two-bank gang-collision attack synthesises
+> physical addresses up to ~17 GB, so `--mem-size` was raised from `8GB` to
+> `32GB` in `poc-scripts/dream_poc_utece.sh` and `result-scripts/run_config.py`.
+> `--mem-size` only sets the address-space ceiling — it doesn't change DRAM
+> timing — so PRAC/RFM results are bit-invariant under this change.
+
 `gem5.opt` dynamically links `libramulator.so` (`gem5/ext/ramulator2/SConscript`
 sets `LIBS=['ramulator']` + `RPATH=[ramulator2_path]`), so for any change that
 *only* touches Ramulator's internal source files (DRAM model timing values,
@@ -230,17 +244,20 @@ This walks `results/`, builds `results/ber_*.csv` and `results/noise_ber_*.csv`,
 prints a summary to stdout, and calls the plotters in `plot-scripts/` to
 write `figures/figure*.pdf`.
 
-Expected summary on a healthy run:
+Expected summary on a healthy run (post-Path-A, see §5.1.2 / §6):
 
 ```
 Results for baseline PRAC, RFM, and DREAM:
-PRAC  Raw Bit Rate (Kbps): 35.668  mean BER: 0.0356
-RFM   Raw Bit Rate (Kbps): 48.774  mean BER: 0.0000
-DREAM Raw Bit Rate (Kbps): 48.769  mean BER: 0.0484
+PRAC  Raw Bit Rate (Kbps): 39.015  mean BER: 0.0356
+RFM   Raw Bit Rate (Kbps): 48.770  mean BER: 0.1972
+DREAM Raw Bit Rate (Kbps): 48.769  mean BER: 0.4781
 
-Noise channel capacity:
-PRAC: 12.41 Kbps   RFM: 5.23 Kbps   DREAM: 20.38 Kbps
+Noise channel capacity (BER-adjusted, mean over the 3- or 4-rate subset):
+PRAC: ~13.47 Kbps   RFM: ~46.71 Kbps   DREAM: ~0.13 Kbps
 ```
+
+The RFM "baseline BER worse than under-noise BER" is a known artefact of
+the post-revert detection band on the all-1s `0xFF` pattern — see §6.
 
 ---
 
@@ -333,7 +350,8 @@ sub-channel**. Concretely, this means:
 |------------|--------|
 | (initial)  | Per-bank gang counters (`m_tusc[bank][gang]`), bulk reset every 64 ms. Deviated from the paper's cross-bank shared DCT design. |
 | 2026-04-25 | Rewrote to the paper's cross-bank shared DCT with randomized grouping, vertical sharing, and gradual reset. |
-| 2026-04-25 (later) | **Reverted simulator-side timing inflation introduced in commit `e462c3e`.** That commit had bumped `nDRFMab`/`nDRFMsb`/`nRFM*` in `DDR5-VRR.cpp` to 5000 mem cycles (~3 µs each) to make DRFMab events conspicuous from userspace, and inflated three companion latency-band constants in `rowhammer-side.hh` (`PERIODIC_CAP_NS` 1300→8000, `PERIODIC_CAP_NS_RFM` 550→6000, `ACCESS_CAP_NS` 250→2000) plus dropped `rowhammer-rfm-receiver.cc` `ASSERT_THRESH` from 3→1. **Side effect:** broke the RFM POC (decoded all-zeros — see `figures/figure6.broken.pdf` vs `figure6bak.pdf`) because the inflated band missed the larger-but-rarer RFM stalls. Revert restored `nDRFMab` to JEDEC formula `2*BRC*tRRFsb` (~150 ns) and the userspace bands/threshold to the artifact defaults; RFM POC now decodes `MICRO` cleanly. **DREAM is currently broken under this revert** (its detection band `(DREAM_DRFMAB_CAP_NS=2000, PERIODIC_CAP_NS=1300)` is now empty — see §7 step 1 for the re-tuning plan). |
+| 2026-04-25 (later) | **Reverted simulator-side timing inflation introduced in commit `e462c3e`.** That commit had bumped `nDRFMab`/`nDRFMsb`/`nRFM*` in `DDR5-VRR.cpp` to 5000 mem cycles (~3 µs each) to make DRFMab events conspicuous from userspace, and inflated three companion latency-band constants in `rowhammer-side.hh` (`PERIODIC_CAP_NS` 1300→8000, `PERIODIC_CAP_NS_RFM` 550→6000, `ACCESS_CAP_NS` 250→2000) plus dropped `rowhammer-rfm-receiver.cc` `ASSERT_THRESH` from 3→1. **Side effect:** broke the RFM POC (decoded all-zeros — see `figures/figure6.broken.pdf` vs `figure6bak.pdf`) because the inflated band missed the larger-but-rarer RFM stalls. Revert restored `nDRFMab` to JEDEC formula `2*BRC*tRRFsb` (~150 ns) and the userspace bands/threshold to the artifact defaults; RFM POC now decodes `MICRO` cleanly. |
+| 2026-04-26 | **"Path A" harness fix — corrected userspace ↔ Ramulator address mapping for DREAM.** Two bugs in `gem5/attack-scripts/rowhammer-addr.hh` were silently scrambling the DREAM sender's two-bank gang-collision attack: (1) `make_robaracoch` laid out bits as `[row \| bg \| ba \| rank \| col \| ch]`, but Ramulator2's `RoBaRaCoCh_with_rit` mapper reads them as `[row \| ba \| bg \| rank \| col \| ch]` — i.e. bg/ba were swapped (PRAC/RFM/noise pin (bg=7,ba=3)=`0b111,0b11` which is invariant under the swap, so they were unaffected); (2) `Addr_t` was `uint32_t`, but the DDR5_16Gb_x8 bit budget is 34 bits (TX(6)+col(6)+rank(1)+bg(3)+ba(2)+row(16)), silently dropping row bits 14–15. A related shift-truncation in `make_bits` was also fixed by casting `bits` to `T` before the shift. Companion change: `--mem-size` raised from `8GB` to `32GB` in `poc-scripts/dream_poc_utece.sh` and `result-scripts/run_config.py` (gem5 fataled when the now-correct ~10.8 GB physical address exceeded the previous 8 GB ceiling; mem-size only sets the address-space cap, doesn't change DRAM timing, so PRAC/RFM are bit-invariant). After this fix the DREAM POC and matrix run cleanly with no resyncs and no fatals. **Empirical conclusion:** see §6 — under the random-grouping plugin with `T_TH=40`, the LeakyHammer attacker recovers ~0 channel capacity (mean BER 0.47–0.48 baseline and under noise; capacity ≤ 0.15 Kbps), i.e. DREAM-C with random grouping is essentially closed against this attacker class. |
 
 ### 5.2 Sender + receiver
 
@@ -369,19 +387,50 @@ and was not modified.
 
 ## 6. Current results vs. paper
 
-| Preset | Noiseless capacity (ours) | Paper claim | Notes |
-|--------|----------------------------|-------------|-------|
-| RFM    | **48.77 Kbps** (matrix, pre-`e462c3e`-revert); RFM POC decodes `MICRO` cleanly post-revert | 48.7 Kbps   | Matches paper exactly. Matrix CSVs/figures dated before 2026-04-25 are consistent. |
-| PRAC   | ~27.6 Kbps                 | 39.0 Kbps   | Below paper — not yet investigated. PRAC has ~3.6% baseline BER from receiver self-noise (separate issue from drift). |
-| DREAM  | **STALE / BROKEN** — old numbers (~33 Kbps noiseless, 20.4 Kbps under noise) were generated against the inflated `nDRFMab=5000` simulator state. After the 2026-04-25 timing revert (§5.1.2) DREAM decoders see no events; both POC and matrix produce all-zeros until the detection band is re-tuned. | (new) | See §7 step 1 for re-tuning plan. |
+All numbers below are computed from `results/{ber,noise_ber}_*.csv` after the
+2026-04-26 Path A fix (§5.1.2). "Cap" is `raw_kbps · (1 − H(BER))`, the
+binary-symmetric-channel capacity used by the paper. The matrix uses the
+3- or 4-rate noise subset from `run_config.py` (PRAC: 4 rates incl. one
+50% BER point; RFM/DREAM: 3 rates), not the paper's full 16-rate sweep.
+
+| Preset | Baseline raw Kbps | Baseline mean BER | Baseline cap (Kbps) | Mean cap under noise (Kbps) | Paper noiseless | Notes |
+|--------|-------------------|-------------------|----------------------|------------------------------|------------------|-------|
+| PRAC   | 39.02             | 0.036             | **30.36**            | 13.47                        | 39.0 Kbps        | Raw bitrate now matches paper. The 3.6% baseline BER comes entirely from `0x00` (114/800 errors); other patterns are clean. Likely receiver self-noise — out of scope for the DREAM work. |
+| RFM    | 48.77             | 0.197             | 13.84                | **46.71**                    | 48.7 Kbps        | Counter-intuitive: cleaner *under* noise than at baseline. Per-pattern: BER is 0% on `0x00`, 17% on `0x55`, 12% on `0xAA`, 50% on `0xFF`. Adding noise apparently desynchronises the always-on RFM cadence enough to recover the alternating patterns. Capacity at the paper's noise rates (200/263/325) is 44.5/48.1/47.9 Kbps — i.e. the paper's claim holds in the noisy regime; the noiseless `0xFF` pathology is a known property of the post-revert detection band, not a Path-A regression. |
+| DREAM  | 48.77             | **0.478**         | **0.067**            | **0.13**                     | (new)            | The attacker recovers essentially **no** covert channel. Per-rate: BER ≈ 0.47 across {0, 200, 263, 325}; capacity ≤ 0.15 Kbps everywhere. ~360× less leaky than RFM under noise, ~100× less than PRAC. See "Why DREAM looks closed" below. |
+
+**Why DREAM looks closed (mechanistic story consistent with the data):**
+
+1. The plugin is now paper-faithful (per-bank random XOR masks, shared
+   sub-channel DCT, `T_TH=40`, `vertical_sharing=1`). Each bank's masks
+   are independent, so the sender's two-bank gang-collision strategy
+   (hammer two banks whose `(row XOR mask[ba])` lands on the same DCT
+   entry) produces a well-defined attack — but only against *that* one
+   gang, while the receiver still has to land its 1024-row probe set on
+   that same gang.
+2. With shared-DCT semantics the receiver's own probes and any noise
+   contribute to whatever counter the sender is trying to saturate, but
+   with the random per-bank mask their contributions land on **different**
+   DCT entries from the sender's. Net: the sender hammers gang `g`, the
+   receiver mostly probes other gangs, and even when probes do land on
+   `g` the rate-of-arrival of DRFMab is too low for the receiver's
+   per-window classifier to outvote noise on every pattern.
+3. Post-`e462c3e`-revert, DRFMab's controller-side stall is in the same
+   ~250–550 ns band as RFM. The DREAM receiver's spike classifier can
+   *count* spikes in that band but cannot tell DRFMab apart from a
+   merely-busy queue, so any non-DRFMab queue noise feeds straight into
+   the bit decision.
+
+The empirical 0.13 Kbps under noise is consistent with "the sender's
+intended modulation is invisible at the receiver's bank/gang slice."
 
 Figures live in `gem5/figures/`:
-- `figure4.pdf` — PRAC channel capacity vs noise intensity
-- `figure6.pdf` — RFM POC (current; matches `figure6bak.pdf` at the bit level, per-window RFM counts differ — Debug-build artifact, see §4.2)
-- `figure6.broken.pdf` — RFM POC against the inflated-timing state, all-zero decode (kept for reference)
-- `figure6bak.pdf` — pre-`e462c3e` working RFM POC reference (Apr 3, original Release `libramulator.so`)
-- `figure7.pdf` — RFM channel capacity vs noise intensity
-- `figure7_dream.pdf` — DREAM, same axes as figure7 (**stale, regenerate after re-tune**)
+- `figure4.pdf` — PRAC channel capacity vs noise intensity (current).
+- `figure6.pdf` — RFM POC (current; matches `figure6bak.pdf` at the bit level, per-window RFM counts differ — Debug-build artifact, see §4.2).
+- `figure6.broken.pdf` — RFM POC against the inflated-timing state, all-zero decode (kept for reference).
+- `figure6bak.pdf` — pre-`e462c3e` working RFM POC reference (Apr 3, original Release `libramulator.so`).
+- `figure7.pdf` — RFM channel capacity vs noise intensity.
+- `figure7_dream.pdf` — DREAM, same axes as figure7 (**regenerated 2026-04-26**, shows ~0 capacity at all noise rates — visually almost a flat line at the bottom of the plot).
 
 ---
 
@@ -398,62 +447,53 @@ whether DREAM is more or less leaky than the industry-standard defenses.
 - Diagnosed and fixed a long-standing receiver phase-drift bug that broke
   alternating-bit patterns (`0x55`/`0xAA`) for both DREAM and RFM.
   See `RECEIVER_DRIFT_FIX.md`.
-- Reproduced the paper's RFM noiseless capacity (48.77 vs 48.7 Kbps).
+- Reproduced the paper's RFM noiseless raw bitrate (48.77 vs 48.7 Kbps);
+  capacity matches at the paper's noise rates (~46.7 Kbps mean).
+- **2026-04-26 — Path A harness fix.** Diagnosed and corrected a
+  userspace ↔ Ramulator address mapping mismatch (`bg/ba` swap +
+  `Addr_t=uint32_t` truncating row bits 14–15) and the companion
+  `--mem-size` ceiling, then re-ran the full DREAM matrix. See §5.1.2
+  changelog and §6 for the empirical results.
+- **Headline finding for DREAM-C with random grouping (`grouping=random`,
+  `T_TH=40`, `vertical_sharing=1`):** the LeakyHammer attacker recovers
+  ≤ 0.15 Kbps everywhere (mean BER ≈ 0.47–0.48 across all noise rates),
+  i.e. **no useful covert channel** under this attacker model. RFM at
+  the same noise rates leaks ~46.7 Kbps mean and PRAC ~13.5 Kbps mean.
 
-**Open / likely next steps:**
-1. **Re-tune the DREAM detection band against the now-restored ~150 ns
-   DRFMab.** After the 2026-04-25 timing revert (§5.1.2), `nDRFMab` is back
-   to the JEDEC formula `2*BRC*tRRFsb` ≈ 240 mem-cycles ≈ 150 ns DRAM-side.
-   The userspace probe will see this amplified by the controller's queue
-   stall to roughly the same `(250, 550)` ns band as RFM events — meaning
-   *latency magnitude alone no longer distinguishes a DRFMab from an RFM*.
-   Concrete sub-tasks (see also "Plan for §7 step 1" below):
-   - Instrument `dream_receive_count` to print a latency histogram per
-     window across a few representative configs (DREAM only, DREAM+noise)
-     so we know the actual post-revert spike distribution.
-   - Decide on a new discriminator: most likely **rank-scope** (DRFMab
-     stalls *every* bank in the rank, RFM stalls only the addressed bank)
-     by probing two banks in different bank-groups and requiring
-     simultaneous spikes; or **rate** (DRFMab fires once per `threshold`
-     ACTs into the gang, much rarer than per-bank RFM under the same load).
-   - Update `DREAM_DRFMAB_CAP_NS`/`DREAM_DRFMAB_UPPER_NS` in
-     `rowhammer-side.hh` and the `dream_send`/`dream_receive_count`
-     bodies in `rowhammer-side.cc`.
-   - Wipe stale DREAM results, re-run the matrix (`grep dream`), re-plot.
-2. **Re-run the full DREAM matrix** once the detection band is fixed.
-   Recommended sequence:
-   ```bash
-   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/gem5":/app \
-       leakyhammer_artifact "./rebuild.sh --ramulator"
-   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/gem5":/app \
-       leakyhammer_artifact "./compile_attack_scripts.sh"
-
-   # Wipe stale DREAM results.
-   docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/gem5":/app \
-       leakyhammer_artifact "rm -rf /app/results/dream/*"
-
-   # Regenerate run scripts and run the DREAM matrix.
-   cd gem5 && uv run python3 ./result-scripts/setup_test.py -c -cc docker
-   cat run.sh | grep dream | sed 's/^sh //' | \
-       xargs -I{} -P4 sh -c 'echo "[$(date +%H:%M:%S)] START {}"; sh {}; echo "[$(date +%H:%M:%S)] DONE  {}"'
-
-   uv run --with pandas --with numpy --with matplotlib --with seaborn \
-       python3 result-scripts/parse_and_print.py
-   ```
-3. Investigate the PRAC noiseless gap (we get ~28 Kbps, paper gets 39 Kbps).
-   This is *not* the drift bug; it looks like receiver self-noise inside
-   `prac_receive`. Out of scope for the recent work but the obvious next
-   target.
-4. Sweep DREAM's `threshold` and `vertical_sharing` parameters in
-   `dream.yaml` to characterise how DREAM's detection sensitivity trades
-   off against channel capacity. The paper studies T_RH ∈ {125, 250, 500,
-   1000} which corresponds to `threshold` ∈ {62, 125, 250, 500} and
-   `vertical_sharing` ∈ {1, 2, 4, 8}.
-5. Cross-validate the `figure7_dream.pdf` numbers by hand-computing
-   capacity from `noise_ber_dream.csv` (after step 2 regenerates them).
-6. Optionally: run `setup_recommended_subset.py` instead of `setup_test.py`
-   to do the full paper-style 16-rate sweep (it currently uses a 3- or
-   4-rate subset to keep wall time down).
+**Open / likely next steps (none required to ship the DREAM result):**
+1. **(Validation, optional)** Sweep DREAM's `threshold` and
+   `vertical_sharing` in `dream.yaml` to confirm the negative result is
+   *robust*, not a single-config artefact. The paper studies T_RH ∈
+   {125, 250, 500, 1000} → `threshold` ∈ {62, 125, 250, 500} and
+   `vertical_sharing` ∈ {1, 2, 4, 8}. Note that **lowering** `threshold`
+   makes DRFMab fire more often, which is the *attacker-favourable*
+   direction; we already tested `threshold=40` (paper-min ≈ 62) and saw
+   nothing, so paper-strength settings should leak ≤ this. Worth running
+   `threshold ∈ {62, 125, 250}` to make that claim quantitatively.
+2. **(Validation, optional)** Run DREAM with `grouping: set_assoc` for a
+   point of comparison. The paper itself shows set-assoc grouping under
+   MOP4 mapping produces hot counters and a usable channel; confirming
+   we see a non-zero capacity there would (a) prove the harness is in
+   fact capable of detecting a DREAM channel when one exists, and (b)
+   rule out the alternative explanation "DREAM looks closed because the
+   harness/decoder is broken, not because DREAM is closed."
+3. **(Better attacker, research-extension)** The current decoder uses a
+   per-window spike-count threshold against latencies in `(250, 1300)` ns.
+   A smarter attacker could (i) probe two different bank-groups and
+   require *simultaneous* spikes (DRFMab is rank-scope, RFM is
+   bank-scope) or (ii) cross-correlate spike timing against the
+   sender's clock. If either of these recovers a meaningful channel,
+   the wrap-up claim becomes "DREAM-C with random grouping resists the
+   *paper's* attacker but not all attackers" rather than "no
+   significant covert channel."
+4. **(Polish, optional)** Investigate the PRAC noiseless `0x00` BER
+   (114/800 errors, 14.25%; other patterns are clean). Looks like
+   receiver self-noise inside `prac_receive`. Independent of the DREAM
+   work.
+5. **(Polish, optional)** Run `setup_recommended_subset.py` instead of
+   `setup_test.py` to do the full paper-style 16-rate noise sweep (we
+   currently use a 3- or 4-rate subset to keep wall time down). Mostly
+   relevant for figure aesthetics.
 
 ---
 

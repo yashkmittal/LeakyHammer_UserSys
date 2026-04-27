@@ -201,13 +201,33 @@ class DREAM : public IControllerPlugin, public Implementation {
 
       // Initialize per-bank XOR masks. With m_seed fixed by config, this
       // is reproducible across runs of the same experiment.
+      //
+      // We use std::mt19937_64 (a standardized algorithm with a stable
+      // sequence given a seed) and an explicit modulo, INSTEAD of
+      // std::uniform_int_distribution. The latter's mapping from rng()
+      // output to int is implementation-defined and varies across libstdc++
+      // versions, which would break the userspace mask replicator in
+      // rowhammer-side.cc::dream_compute_random_masks(). Keep this code in
+      // lock-step with the userspace function.
       std::mt19937_64 rng((uint64_t) m_seed);
-      std::uniform_int_distribution<int> dist(0, m_num_dct_entries - 1);
       m_xor_mask.assign(m_num_ranks, std::vector<int>(m_num_banks_per_rank, 0));
       for (int r = 0; r < m_num_ranks; r++) {
         for (int b = 0; b < m_num_banks_per_rank; b++) {
-          m_xor_mask[r][b] = dist(rng);
+          m_xor_mask[r][b] = (int) (rng() % (uint64_t) m_num_dct_entries);
         }
+      }
+
+      // Always print masks at init (not gated on m_is_debug) so userspace
+      // sender/receiver runs can be cross-checked against the simulator's
+      // view of the random grouping. Format chosen to be greppable.
+      std::cout << "[Ramulator::DREAM] random_masks (seed=" << m_seed
+                << ", num_entries=" << m_num_dct_entries << "):" << std::endl;
+      for (int r = 0; r < m_num_ranks; r++) {
+        std::cout << "[Ramulator::DREAM]   rank=" << r << ":";
+        for (int b = 0; b < m_num_banks_per_rank; b++) {
+          std::cout << " " << m_xor_mask[r][b];
+        }
+        std::cout << std::endl;
       }
 
       if (m_is_debug) {

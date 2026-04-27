@@ -50,13 +50,23 @@
 #define TERNARY_CAP_UP        240
 #define TERNARY_CAP_DOWN      130
 
-// DREAM-C DRFMab detection
-// DRFMab (nDRFMab=5000 mem cycles) is expected to be CPU-visible at ~2000-7000ns
-// based on the same ~7-20x amplification factor observed for RFM
-#define DREAM_DRFMAB_CAP_NS   2000    // Lower bound: well above normal row miss (~500ns)
-#define DREAM_DRFMAB_UPPER_NS 7500    // Upper bound: below PRAC ABO (8000ns)
-#define DREAM_ASSERT_THRESH   0       // Sender produces ~1 DRFMab per "1" window; require >0 spikes (i.e. >=1) to decode "1"
-#define DREAM_TXN_PERIOD      50000   // Window size (ns); 40 hammers ~20us => 2+ DRFMab per window
+// DREAM-C DRFMab detection.
+//
+// Post-revert (DDR5-VRR.cpp at JEDEC formulas) DRFMab uses
+//   nDRFMab = 2 * BRC * tRRFsb_TABLE[0][density_id]   (~140 ns at the DRAM)
+// which is the same family of values that drive nRFM* — empirically the RFM
+// POC sees those stalls in the (250, 550) ns CPU-visible band, so DRFMab
+// stalls should land in roughly the same place. Start from the RFM band
+// and tune from the receiver's spike-count histogram.
+//
+// Pre-revert (commit e462c3e era), nDRFMab was overridden to 5000 mem cycles
+// (~3 us at the DRAM, ~2-7 us CPU-visible) and these constants were
+// 2000 / 7500. Don't be tempted to "go back" to those values — DRFMab now
+// lives where RFM does.
+#define DREAM_DRFMAB_CAP_NS   250     // Lower bound: above a normal row miss
+#define DREAM_DRFMAB_UPPER_NS 1300    // Upper bound: below a PRAC back-off / periodic stall
+#define DREAM_ASSERT_THRESH   0       // (legacy boolean receiver — unused; v2 uses DREAM_DECODE_THRESH)
+#define DREAM_TXN_PERIOD      50000   // Window size (ns); only consulted as a default — actual matrix value is in run_config.py
 
 long mmap_atk(size_t mem_size, long paddr);
 uint32_t fine_grained_sleep(uint32_t sleep_ns);
@@ -96,12 +106,59 @@ int rfm_receive_rfmctr(std::vector<char*>& row_ptrs, int assert_thresh);
 bool prac_trefi_send(std::vector<char*>& row_ptrs, uint32_t timeout, uint32_t max_lat);
 bool prac_trefi_receive(std::vector<char*>& row_ptrs, uint32_t timeout, uint32_t max_lat);
 
-// DREAM-C: detect DRFMab events (all-bank stall triggered by row-group activation counter)
-void dream_send(std::vector<char*>& row_ptrs, uint32_t timeout);
-bool dream_receive(std::vector<char*>& row_ptrs, uint32_t timeout);
-// v2: round-robin probes across N rows in N distinct gangs with rate-throttled
-// probing (probe_interval_ns spacing). Returns raw spike count for rate-based decoding.
-int  dream_receive_count(std::vector<char*>& row_ptrs, uint32_t timeout,
-                         uint32_t probe_interval_ns);
+// DREAM-C: detect DRFMab events (all-bank stall triggered by row-group
+// activation counter).
+//
+// All these helpers assume the Ramulator2 DREAM plugin is configured with
+// `grouping: random` (the paper-default). Under that grouping the plugin
+// hashes each ACT to a DCT entry as
+//
+//     idx = (row XOR mask[rank][bank_in_rank]) mod num_dct_entries
+//
+// where `mask[r][b]` is generated deterministically from the YAML `seed`
+// at simulator init. Because XOR-with-mask is a bijection (and num_entries
+// equals num_rows_per_bank when vertical_sharing=1), TWO ROWS IN THE SAME
+// BANK CANNOT SHARE A DCT ENTRY under random grouping. The sender therefore
+// has to coordinate ACTs from TWO DIFFERENT BANKS at row addresses that
+// XOR-through different masks to the same DCT index. The receiver must
+// likewise know its bank's mask to pick rows that span N distinct DCT
+// entries while avoiding the sender's entry.
+//
+// Use `dream_compute_random_masks` to replicate the plugin's mask table
+// in userspace; keep its arguments in sync with `dream.yaml` (`seed`) and
+// the DRAM organization (`num_ranks`, `num_banks_per_rank`,
+// `num_dct_entries = num_rows_per_bank / vertical_sharing`).
+
+// Replicates the Ramulator2 DREAM plugin's per-(rank, bank) XOR-mask table
+// bit-for-bit. Returned shape: result[rank][bank_in_rank].
+std::vector<std::vector<int>>
+dream_compute_random_masks(uint64_t seed,
+                           int num_ranks,
+                           int num_banks_per_rank,
+                           int num_dct_entries);
+
+// `bank_in_rank` index used by the plugin: bank + bg * num_banks_per_group.
+// Helper provided so callers don't have to hard-code the math.
+int dream_bank_in_rank(int bg, int ba, int num_banks_per_group);
+
+// Hammer all rows in `row_ptrs` round-robin for the full timeout window.
+// Caller MUST construct `row_ptrs` so that every entry maps to the SAME
+// DCT index under the plugin's random grouping (use the masks returned by
+// `dream_compute_random_masks` to compute collision-targeted row IDs).
+// Hammering rows that don't share a DCT entry will spread the per-counter
+// ACT rate across multiple counters and starve the threshold trigger.
+void dream_send_random_gang(std::vector<char*>& row_ptrs, uint32_t timeout);
+
+// Round-robin probe over `row_ptrs`, with `probe_interval_ns` spacing
+// between probes (set to 0 for full speed). Returns raw count of latency
+// spikes in the DREAM detection band per window.
+//
+// Caller MUST construct `row_ptrs` so that every entry maps to a DISTINCT
+// DCT index AND none of those indices collide with the sender's DCT entry
+// (otherwise the receiver self-triggers DRFMab on its own bank,
+// indistinguishable from the sender's events).
+int dream_receive_count_random_gang(std::vector<char*>& row_ptrs,
+                                    uint32_t timeout,
+                                    uint32_t probe_interval_ns);
 
 #endif  // ROWHAMMER_SIDECH_H_

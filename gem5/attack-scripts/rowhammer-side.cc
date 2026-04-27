@@ -1,5 +1,6 @@
 #include "rowhammer-side.hh"
 #include <iostream>
+#include <random>
 
 // #define VERBOSE
 
@@ -552,16 +553,61 @@ bool prac_trefi_send(std::vector<char*>& row_ptrs, uint32_t timeout, uint32_t ma
     return false;
 }
 
-// DREAM-C: hammer target rows until DRFMab fires (latency spike), then return.
-// The DREAM-C plugin fires DRFMab after `threshold` activations to any rows sharing
-// the same DCT group (group_id = row_id / gang_size). With threshold=40 and gang_size=32,
-// rows 0 and 1 both land in group 0, so 40 hammers to either row triggers DRFMab.
+// =============================================================================
+// DREAM-C helpers (random grouping)
+// =============================================================================
 //
-// We MUST alternate between at least two distinct rows in the same gang. Hammering
-// a single row is a row-buffer hit on every access (no ACT, no counter increment)
-// when the controller's RowPolicy keeps the row open. Alternating rows forces an
-// activate on every iteration, so the DREAM counter actually accumulates.
-void dream_send(std::vector<char*>& row_ptrs, uint32_t timeout) {
+// All DREAM-C helpers below assume the Ramulator2 plugin is configured with
+// `grouping: random` (the paper-default and what we ship in dream.yaml).
+//
+// Under random grouping, the plugin computes:
+//
+//     bank_in_rank = bank + bg * num_banks_per_group
+//     idx          = (row XOR mask[rank][bank_in_rank]) mod num_dct_entries
+//
+// The mask table is generated deterministically from the YAML `seed` at
+// simulator init. We replicate it here in userspace so the sender/receiver
+// can pick row IDs that deliberately collide on (or avoid) a given DCT
+// entry. CRITICAL: the algorithm below MUST stay bit-for-bit identical to
+// dream.cpp's mask init (mt19937_64(seed) -> rng() % num_entries, walking
+// (rank, bank) in this exact order). The plugin prints its mask table at
+// init, so a stdout grep on a fresh run is the source of truth if the two
+// halves ever drift.
+// =============================================================================
+
+std::vector<std::vector<int>>
+dream_compute_random_masks(uint64_t seed,
+                           int num_ranks,
+                           int num_banks_per_rank,
+                           int num_dct_entries) {
+    std::mt19937_64 rng(seed);
+    std::vector<std::vector<int>> mask(
+        num_ranks, std::vector<int>(num_banks_per_rank, 0));
+    for (int r = 0; r < num_ranks; r++) {
+        for (int b = 0; b < num_banks_per_rank; b++) {
+            mask[r][b] = (int) (rng() % (uint64_t) num_dct_entries);
+        }
+    }
+    return mask;
+}
+
+int dream_bank_in_rank(int bg, int ba, int num_banks_per_group) {
+    return ba + bg * num_banks_per_group;
+}
+
+// DREAM-C, random grouping: hammer all rows in `row_ptrs` round-robin for
+// the full timeout window. The DRFMab trigger relies on every ACT landing
+// on the SAME DCT entry, which only happens if the caller picks rows whose
+// (row XOR mask[rank][bank]) values collide. See the header for details.
+//
+// We deliberately hammer for the full window without checking latency: an
+// earlier version of this function exited on the first observed DRFMab
+// stall (modeled after rfm_send's exit-on-PERIODIC_CAP_NS pattern). That
+// produced one event per "1" window, which is the same order of magnitude
+// as the receiver's spurious-spike floor, collapsing the channel SNR.
+// Hammering for the full window produces several DRFMab events per "1"
+// window and gives the receiver a clear histogram peak to thresh.
+void dream_send_random_gang(std::vector<char*>& row_ptrs, uint32_t timeout) {
     uint64_t start = m5_rpns();
     size_t n_rows = row_ptrs.size();
     size_t idx = 0;
@@ -570,63 +616,31 @@ void dream_send(std::vector<char*>& row_ptrs, uint32_t timeout) {
         idx++;
         if (idx >= n_rows) idx = 0;
         asm volatile("clflush (%0)" : : "r" (target_row) : "memory");
-        uint64_t ns1 = m5_rpns();
         *(volatile char*)target_row;
-        uint64_t ns2 = m5_rpns();
-        uint64_t latency = ns2 - ns1;
-        // DRFMab stalls all banks; latch is in the range above normal row miss but below PRAC ABO
-        if (latency > DREAM_DRFMAB_CAP_NS && latency < PERIODIC_CAP_NS) {
-            return;
-        }
     }
 }
 
-// DREAM-C: count DRFMab stalls observed on the receiver's bank during the window.
-// Because DRFMab stalls ALL banks in the sub-channel, the receiver on any bank will
-// see the same latency spike when the sender triggers DRFMab. Returns true if at
-// least DREAM_ASSERT_THRESH spikes are observed (i.e., sender was hammering).
-bool dream_receive(std::vector<char*>& row_ptrs, uint32_t timeout) {
-    uint64_t start = m5_rpns();
-    char* target_row = row_ptrs[0];
-    int drfm_ctr = 0;
-    while (m5_rpns() - start < timeout) {
-        asm volatile("clflush (%0)" : : "r" (target_row) : "memory");
-        uint64_t ns1 = m5_rpns();
-        *(volatile char*)target_row;
-        uint64_t ns2 = m5_rpns();
-        uint64_t latency = ns2 - ns1;
-        if (latency > DREAM_DRFMAB_CAP_NS && latency < PERIODIC_CAP_NS) {
-            drfm_ctr++;
-        }
-    }
-    return drfm_ctr > DREAM_ASSERT_THRESH;
-}
-
-// DREAM-C v2: spread-row, rate-throttled receiver. Round-robins probes across
-// N rows that each map to a distinct DCT gang (group_id = row_id / gang_size).
+// DREAM-C, random grouping: spread-row, rate-throttled receiver.
+// Round-robins probes across N rows each in a DISTINCT DCT entry (none of
+// which collides with the sender's entry, see header), with `probe_interval_ns`
+// spacing between probes.
 //
-// Two design constraints:
-//   1. Per-gang ACT rate must stay below DREAM's threshold (40 / 64ms / gang)
-//      or the receiver triggers DRFMab on its own bank, indistinguishable from
-//      the sender. Round-robin across N gangs divides the receiver's per-gang
-//      ACT rate by N.
-//   2. Probe interval must be <= DRFMab stall duration (~7us) so every stall
-//      gets caught by at least one probe.
-//
-// We satisfy both by enforcing a probe_interval_ns spacing between probes.
-// With N=512 gangs and probe_interval=5us:
-//   - probes per attack: 16ms / 5us = 3200; per-gang ACTs: 6.25 (< 10 budget)
-//   - probes per 20us window: 4; each probe spans 5us so catches any 7us stall
-int dream_receive_count(std::vector<char*>& row_ptrs, uint32_t timeout,
-                        uint32_t probe_interval_ns) {
+// Two design constraints (independent of grouping function):
+//   1. Per-DCT-entry ACT rate must stay below DREAM's threshold or the
+//      receiver triggers DRFMab on its own bank, indistinguishable from
+//      the sender's events. Round-robin across N entries divides the
+//      receiver's per-entry ACT rate by N.
+//   2. Probe interval must be <= DRFMab stall duration so every stall gets
+//      caught by at least one probe.
+int dream_receive_count_random_gang(std::vector<char*>& row_ptrs,
+                                    uint32_t timeout,
+                                    uint32_t probe_interval_ns) {
     uint64_t start = m5_rpns();
     int drfm_ctr = 0;
     size_t n_rows = row_ptrs.size();
     size_t idx = 0;
     uint64_t next_probe = start;
     while (m5_rpns() - start < timeout) {
-        // Throttle: wait until next scheduled probe time. Skip throttle if
-        // probe_interval_ns is 0 (full speed mode for back-compat).
         if (probe_interval_ns > 0) {
             while (m5_rpns() < next_probe) { /* spin */ }
             next_probe += probe_interval_ns;

@@ -32,35 +32,51 @@
 #include "rowhammer-addr.hh"
 #include "rowhammer-side.hh"
 
-// DREAM-C v2 receiver: spread-row, rate-based decoder.
+// DREAM-C v2 receiver (random grouping): spread-row, rate-based decoder.
 //
-// Why: the original single-row receiver crossed DREAM's per-gang threshold
-// (40 ACTs / 64ms / gang_size=32) on its own, generating self-DRFMab events
-// indistinguishable from the sender's. We now allocate ROW_COUNT rows whose
-// physical row IDs are spaced GANG_SIZE apart, so each row maps to a distinct
-// DCT gang. Round-robin probing dilutes the receiver's per-gang ACT count by
-// a factor of ROW_COUNT, ideally dropping it below DREAM's threshold while
-// still catching the sender's all-bank DRFMab stalls.
+// Why: a single-row receiver crosses DREAM's threshold on its own, which
+// makes its self-triggered DRFMab events indistinguishable from the
+// sender's. We allocate ROW_COUNT rows that each hash to a DISTINCT DCT
+// entry under the plugin's random grouping function, then round-robin
+// probe over them. This divides the receiver's per-DCT-entry ACT rate by
+// ROW_COUNT, which is what keeps the receiver below threshold.
 //
-// Decoding is rate-based: we count DRFMab-class latency spikes per window and
-// classify "1" if count > DREAM_DECODE_THRESH. The original boolean decoder
-// (>=1 spike) is too brittle when receiver self-triggers add a baseline rate.
-// Spread across enough gangs to keep per-gang ACT count below DREAM threshold
-// at the chosen probe rate. Constraint: (800 windows * P probes/window) / N gangs
-// must stay below 40 ACTs/64ms / (16ms attack / 64ms) = 10 ACTs/16ms.
-// Choice: P=10 probes/window (probe_interval=2us so any 7us stall catches >=3 probes),
-// N=1024 gangs -> 8000/1024 = 7.8 ACTs/gang/16ms (under threshold).
+// Under random grouping, picking rows {0, GANG_SIZE, 2*GANG_SIZE, ...}
+// already gives ROW_COUNT distinct DCT entries (XOR-with-mask is a
+// bijection, and `i*GANG_SIZE` for i in [0, ROW_COUNT) are distinct).
+// What matters is the SECOND constraint that random grouping introduces:
+// the receiver MUST avoid the DCT entry the sender is hammering. We
+// compute the sender's entry from the replicated mask table and skip any
+// receiver row that would collide with it, replacing it with a row past
+// the end of the candidate window.
 //
-// NOTE: With txn_period=20us the schedule above (10 probes * 2us) packs the
-// entire window with no slack for variable-latency events (DRFMab stalls,
-// periodic refreshes). Empirically the receiver overran by ~200us per worst
-// window, drifting bit alignment off the sender's clock. We address this by
-// running with a larger txn_period (set in run_config.py for DREAM) which
-// gives the same 10-probe schedule plenty of headroom.
-#define ROW_COUNT          1024
-#define GANG_SIZE          32
-#define PROBE_INTERVAL_NS  2000  // 2us spacing -> ~10 probes per 20us window
-#define DREAM_DECODE_THRESH 0    // per-window spike count to decode "1" (>0 spikes)
+// Decoding is rate-based: count DRFMab-class latency spikes per window
+// and classify "1" if count > DREAM_DECODE_THRESH.
+//
+// IMPORTANT: keep DREAM_SEED, DREAM_DCT_ENTRIES, and DREAM_BANKS_PER_*
+// in sync with dream.yaml + DDR5-VRR's organization. Mirror of the same
+// constants in rowhammer-dream-sender.cc.
+#define ROW_COUNT             1024
+#define GANG_SIZE             32      // row spacing; arbitrary so long as it gives distinct DCT entries
+#define PROBE_INTERVAL_NS     2000    // 2us spacing -> ~10 probes per 20us window
+#define DREAM_DECODE_THRESH   0       // per-window spike count to decode "1" (>0 spikes)
+
+#define DREAM_SEED            42
+#define DREAM_DCT_ENTRIES     65536
+#define DREAM_BANKS_PER_GROUP 4
+#define DREAM_BANKS_PER_RANK  32
+
+// Receiver's bank. Pinned to rank 1 so the rank-scoped DCT and DRFMab
+// stall are shared with the sender.
+#define RECV_RANK   1
+#define RECV_BG     7
+#define RECV_BA     3
+
+// Sender's bank A (the one with row=0). Used to compute the sender's
+// target DCT index so we can avoid colliding with it.
+#define SENDER_RANK 1
+#define SENDER_BG_A 0
+#define SENDER_BA_A 0
 
 const int NUM_CHANNEL = 1;
 const int NUM_RANKS = 2;
@@ -76,28 +92,80 @@ int main(int argc, char *argv[]) {
     uint32_t dream_txn_period = std::atoi(argv[1]);
     int msg_bytes = std::atoi(argv[2]);
     char data_pattern = std::strtol(argv[3], NULL, 16);
-    // Leave 8us of margin: dream_receive_count's loop check is at the top of
-    // each iteration, but a probe already inside the loop can take up to ~7us
-    // (a DRFMab stall) to complete after the timeout has elapsed. Without the
-    // margin, almost every window overruns by 3-7us and triggers resync,
-    // discarding bits unnecessarily.
-    uint32_t dream_timeout = dream_txn_period - 8000;
+    // Receiver listens for (txn_period - 2000) ns per window. The 2us margin
+    // covers the worst-case overrun: a probe in flight when timeout elapses
+    // (a DRFMab stall is ~280ns post-revert, plus probe overhead) and a few
+    // hundred ns of CPU jitter. Empirically 1us is borderline (-366ns
+    // overruns triggered 20 resyncs in a 40-bit POC); 2us is safe.
+    //
+    // We previously used 8000 here -- a leftover from the e462c3e timing
+    // regime when DRFMab stalls were ~7 us. With DDR5-VRR.cpp reverted to
+    // JEDEC formulas DRFMab is back to ~280 ns, and an 8 us margin was a
+    // bug: the matrix sender hammers for (txn_period - 500) = 19500 ns, so
+    // sender events from the last 7 us of every "1" window leaked into the
+    // receiver's NEXT window (which was sleeping for those 7 us). The
+    // leakage gave false-positive spikes on "0" windows -- exactly the
+    // misaligned bit pattern we observed before this fix.
+    uint32_t dream_timeout = dream_txn_period - 2000;
 
     srand(0xdead);
-    // N_CH, N_RA, CH, RA, BG, BA, RO, CO
-    // BG=7, Bank=3 — completely different bank from sender (BG=0, Bank=0).
-    // Allocate ROW_COUNT rows at row IDs {0, GANG_SIZE, 2*GANG_SIZE, ...}
-    // so each row sits in its own DCT gang (gang_id = row_id / GANG_SIZE).
-    target = DDR5_16Gb_x8(NUM_CHANNEL, NUM_RANKS, 0, 1, 7, 3, 0, 0);
+
+    // Replicate the plugin's mask table to compute (a) our own bank's
+    // mask -- so we know what DCT entries our probe rows hash to -- and
+    // (b) the sender's target DCT entry, so we can avoid colliding with
+    // it.
+    auto masks = dream_compute_random_masks(
+        DREAM_SEED, NUM_RANKS, DREAM_BANKS_PER_RANK, DREAM_DCT_ENTRIES);
+
+    int recv_bank_idx   = dream_bank_in_rank(RECV_BG, RECV_BA,
+                                             DREAM_BANKS_PER_GROUP);
+    int sender_bank_idx = dream_bank_in_rank(SENDER_BG_A, SENDER_BA_A,
+                                             DREAM_BANKS_PER_GROUP);
+    int recv_mask     = masks[RECV_RANK][recv_bank_idx];
+    int sender_mask_a = masks[SENDER_RANK][sender_bank_idx];
+
+    // Sender hammers (row_a=0 in bank_a, row_b=mask_a^mask_b in bank_b),
+    // both hashing to DCT entry sender_mask_a. The receiver's row r in its
+    // bank hashes to (r XOR recv_mask). Avoid r such that
+    //     r XOR recv_mask == sender_mask_a
+    // i.e. r == sender_mask_a XOR recv_mask.
+    int forbidden_recv_row = sender_mask_a ^ recv_mask;
+
+    std::printf("[DREAM-RECV] random_masks: recv(rank=%d,bg=%d,ba=%d -> %d)=%d "
+                "sender_a(rank=%d,bg=%d,ba=%d -> %d)=%d "
+                "sender_dct_idx=%d forbidden_recv_row=%d\n",
+                RECV_RANK, RECV_BG, RECV_BA, recv_bank_idx, recv_mask,
+                SENDER_RANK, SENDER_BG_A, SENDER_BA_A, sender_bank_idx,
+                sender_mask_a, sender_mask_a, forbidden_recv_row); FLUSH();
+
+    // Allocate ROW_COUNT rows at row IDs {0, GANG_SIZE, 2*GANG_SIZE, ...},
+    // skipping any candidate that would collide with the sender's DCT
+    // entry. We replace a forbidden candidate with row ROW_COUNT*GANG_SIZE
+    // (the next slot past the end of the nominal window). This keeps all
+    // ROW_COUNT rows distinct AND none of them collide with the sender.
+    target = DDR5_16Gb_x8(NUM_CHANNEL, NUM_RANKS, 0, RECV_RANK,
+                          RECV_BG, RECV_BA, 0, 0);
 
     std::vector<char*> row_ptrs(ROW_COUNT, 0);
+    int n_replaced = 0;
     for (int i = 0; i < ROW_COUNT; i++) {
-        target.row = i * GANG_SIZE;
+        int row_id = i * GANG_SIZE;
+        if (row_id == forbidden_recv_row) {
+            row_id = ROW_COUNT * GANG_SIZE;
+            n_replaced++;
+        }
+        // Defensive: row_id must be a valid DDR5_16Gb_x8 row.
+        assert(row_id >= 0 && row_id < DREAM_DCT_ENTRIES);
+        target.row = row_id;
         row_ptrs[i] = (char*) mmap_atk(alloc_size, target.to_physical());
         assert(row_ptrs[i] != MAP_FAILED);
     }
+    if (n_replaced > 0) {
+        std::printf("[DREAM-RECV] Replaced %d colliding probe row(s) with row %d\n",
+                    n_replaced, ROW_COUNT * GANG_SIZE); FLUSH();
+    }
 
-    std::printf("[DREAM-RECV] v2 spread-row: rows=%d, gang_size=%d, probe_interval=%dns, decode_thresh=%d\n",
+    std::printf("[DREAM-RECV] v2 spread-row (random grouping): rows=%d, gang_size=%d, probe_interval=%dns, decode_thresh=%d\n",
                 ROW_COUNT, GANG_SIZE, PROBE_INTERVAL_NS, DREAM_DECODE_THRESH); FLUSH();
     std::printf("[DREAM-RECV] Timeout: %d\n", dream_timeout); FLUSH();
     std::vector<bool> message(msg_bytes * 8, false);
@@ -112,7 +180,7 @@ int main(int argc, char *argv[]) {
     int total_skipped_bits = 0;
     uint64_t ns1 = m5_rpns();
     for (size_t i = 0; i < message.size(); i++) {
-        int n_spikes = dream_receive_count(row_ptrs, dream_timeout, PROBE_INTERVAL_NS);
+        int n_spikes = dream_receive_count_random_gang(row_ptrs, dream_timeout, PROBE_INTERVAL_NS);
         spike_counts[i] = n_spikes;
         message[i] = (n_spikes > DREAM_DECODE_THRESH);
         next_window += dream_txn_period;
