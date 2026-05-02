@@ -109,7 +109,11 @@ plt.axvline(x=1, color='darkorange', linestyle='--', linewidth=2)
 # add text on orange line that says 10x rotated 90
 txt_height = 35
 plt.text(2, txt_height, r"10$\times$", color='darkorange', fontsize=12, rotation=90)
-plt.axvline(x=50, color='purple', linestyle='--', linewidth=2)
+# Purple "channel-closed" reference line is meaningful for RFM (where the
+# channel collapses around 50% intensity) but not for DREAM, whose channel
+# is closed at all intensities. Skip it for the DREAM plot to avoid clutter.
+if label.upper() != "DREAM":
+    plt.axvline(x=50, color='purple', linestyle='--', linewidth=2)
 
 # set x axis limits
 ax1.set_xlim(0, 100)
